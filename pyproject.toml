@@ -9,6 +9,7 @@ dependencies = [
     "ipywidgets>=8.1.8",
     "jupyterlab>=4.5.3",
     "jupyterlab-vim>=4.1.4",
+    "langchain>=1.2.12",
     "lxml>=6.0.2",
     "markdown>=3.10.2",
     "markdownify>=1.2.2",

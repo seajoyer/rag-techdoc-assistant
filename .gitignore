@@ -4,6 +4,7 @@ pyrightconfig.json
 credit_scoring.egg-info
 delme.png
 
+.env
 .devenv*
 devenv.local.nix
 devenv.local.yaml
