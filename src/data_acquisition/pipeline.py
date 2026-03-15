@@ -359,7 +359,7 @@ def _log_summary(pages: list[DocPage]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# URL utilities
+# Utilities
 # ---------------------------------------------------------------------------
 
 def _infer_section(url: str) -> str:
@@ -377,3 +377,91 @@ def _url_to_rel_path(url: str) -> Path:
     rel = re.sub(r"^/docs/stable/", "", path).strip("/")
     rel = re.sub(r"\.html?$", ".md", rel)
     return Path(rel or "index.md")
+
+
+def load_pages_from_disk(output_dir: str | Path) -> list[DocPage]:
+    """
+    Reconstruct ``DocPage`` objects from a previously saved pipeline run.
+
+    Reads the ``_index.jsonl`` manifest (written by ``save_index()``) and
+    loads the corresponding ``.md`` files from disk to populate the
+    ``markdown`` field.  All marker / keyword metadata is deserialized
+    from the JSONL record without re-parsing any HTML.
+
+    This is the canonical way to feed a saved pipeline run into the
+    chunking + embedding notebooks without re-crawling the documentation.
+
+    Parameters
+    ----------
+    output_dir:
+        Root directory that was passed to ``run_pipeline()`` or
+        ``save_page()`` — the directory that contains ``_index.jsonl``
+        and all ``.md`` files.
+
+    Returns
+    -------
+    list[DocPage]
+        Pages in the order they appear in ``_index.jsonl``.
+        Pages whose ``.md`` file is missing are logged and skipped.
+
+    Raises
+    ------
+    FileNotFoundError
+        When ``_index.jsonl`` does not exist in ``output_dir``.
+    """
+    import json
+    from .extractor import PageMarkers, SectionMarker
+
+    output_dir = Path(output_dir)
+    index_path = output_dir / "_index.jsonl"
+
+    if not index_path.exists():
+        raise FileNotFoundError(
+            f"Index not found at {index_path}. "
+            "Run run_pipeline() first to generate the data."
+        )
+
+    pages: list[DocPage] = []
+    with index_path.open(encoding="utf-8") as f:
+        for lineno, line in enumerate(f, 1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError as exc:
+                log.warning("Skipping malformed line %d in index: %s", lineno, exc)
+                continue
+
+            md_path = output_dir / rec["saved_path"]
+            if not md_path.exists():
+                log.warning("Markdown file missing, skipping: %s", md_path)
+                continue
+
+            markdown = md_path.read_text(encoding="utf-8")
+
+            # Reconstruct the nested dataclasses from the serialised dict
+            markers_dict = rec["markers"]
+            sections = [
+                SectionMarker(**s) for s in markers_dict["sections"]
+            ]
+            markers = PageMarkers(
+                module=markers_dict["module"],
+                symbols=markers_dict["symbols"],
+                sections=sections,
+                keywords=markers_dict["keywords"],
+            )
+
+            pages.append(
+                DocPage(
+                    url=rec["url"],
+                    title=rec["title"],
+                    section=rec["section"],
+                    markdown=markdown,
+                    markers=markers,
+                    saved_path=rec["saved_path"],
+                )
+            )
+
+    log.info("Loaded %d pages from %s", len(pages), output_dir)
+    return pages

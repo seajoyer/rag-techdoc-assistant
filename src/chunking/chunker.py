@@ -617,9 +617,9 @@ def _make_chunk(
     source_url = marker.source_url if marker else ""
 
     # Deterministic chunk ID: anchor slug + sub-index + 6-char URL hash.
-    url_hash   = _url_hash(page.url)
+    url_hash    = _url_hash(page.url)
     anchor_slug = re.sub(r"[^a-zA-Z0-9]+", "_", anchor.lstrip("#")).strip("_")
-    chunk_id   = f"{anchor_slug}__{sub_index}__{url_hash}"
+    chunk_id    = f"{anchor_slug}__{sub_index}__{url_hash}"
 
     return Chunk(
         chunk_id=chunk_id,

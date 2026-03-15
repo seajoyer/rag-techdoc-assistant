@@ -1,10 +1,12 @@
 """
-Root package init — exposes the main subpackage
+Root package init — exposes all sub-packages.
 """
 
-from . import data_acquisition, chunking
+from . import data_acquisition, chunking, embedding, vectorstore
 
 __all__ = [
     "data_acquisition",
-    "chunking"
+    "chunking",
+    "embedding",
+    "vectorstore",
 ]
