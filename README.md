@@ -52,9 +52,9 @@ The pipeline is split into four sequential stages, each with its own notebook:
 
 ```
 rag-techdoc-assistant/
+├── pyproject.toml            # project metadata & dependencies (uv)
 ├── devenv.nix                # devenv shell & package configuration
 ├── devenv.yaml               # devenv inputs / follows
-├── pyproject.toml            # project metadata & dependencies (uv)
 ├── .env                      # secrets (not committed)
 ├── LICENSE
 │
@@ -112,13 +112,27 @@ rag-techdoc-assistant/
 
 ### 1. Enter the development shell
 
-This project uses [devenv](https://devenv.sh) to provide a fully reproducible environment. With devenv installed, run:
+This project uses [devenv](https://devenv.sh) to provide a fully reproducible environment, with [direnv](https://direnv.net) for automatic shell activation.
+
+**With direnv (recommended):** Allow the `.envrc` once and the devenv shell activates automatically whenever you enter the project directory:
+
+```bash
+direnv allow
+```
+
+**Without direnv:** Enter the shell manually:
 
 ```bash
 devenv shell
 ```
 
-This drops you into a shell with the correct Python version and all dependencies — including `uv` — already available. Dependencies are declared in `pyproject.toml` and resolved by uv.
+Either way, you will have the correct Python version and all dependencies — including `uv` — available. Dependencies are declared in `pyproject.toml` and resolved by uv.
+
+**Without devenv:** Ensure you have Python 3.12 and [uv](https://docs.astral.sh/uv/) installed, then install dependencies directly:
+
+```bash
+uv sync
+```
 
 > BGE-M3 requires `FlagEmbedding`. On first run it downloads ~2.2 GB of weights from HuggingFace Hub into `models/`. A CUDA-capable GPU is recommended for embedding; CPU works but is significantly slower.
 
