@@ -35,19 +35,37 @@ time, giving BM25-like scoring without any offline IDF computation.
 This asymmetric TF–IDF approach (TF in docs, IDF applied to queries) is the
 standard pattern recommended in the Qdrant documentation for hybrid search.
 
+Token normalisation contract
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Both index-time keyword lists (built by ``extractor._build_keywords``) and
+query-time token lists (produced by ``tokenize_query``) must go through the
+**same normalisation rules** before being hashed, or sparse scores silently
+collapse to zero for tokens that differ only in surrounding punctuation.
+
+``tokenize_query`` is the authoritative implementation of those rules.
+Any future change to token normalisation belongs here and nowhere else.
+
 Usage
 ~~~~~
 ::
 
-    from src.embedding.sparse import keywords_to_sparse
+    from src.embedding.sparse import keywords_to_sparse, tokenize_query
 
-    sv = keywords_to_sparse(["torch", "random", "fork_rng", "devices"])
+    # Query side
+    tokens = tokenize_query("What is torch.cos?")
+    # → ["what", "is", "torch.cos"]
+
+    sv = keywords_to_sparse(tokens)
     # sv.indices → list[int]
-    # sv.values  → list[float]   (raw TF, ready for Qdrant upsert)
+    # sv.values  → list[float]   (raw TF, ready for Qdrant query)
+
+    # Index side (keywords come pre-built from extractor._build_keywords)
+    sv = keywords_to_sparse(["torch", "cos", "torch.cos"])
 """
 
 from __future__ import annotations
 
+import re
 from typing import NamedTuple
 
 
@@ -58,6 +76,69 @@ from typing import NamedTuple
 # 2^17 = 131 072 dimensions.  Sparse enough that Qdrant stores them
 # efficiently as a list of (index, value) pairs.
 VOCAB_SIZE: int = 2**17
+
+
+# ---------------------------------------------------------------------------
+# Token normalisation
+# ---------------------------------------------------------------------------
+
+# Strips any leading/trailing characters that are *not* part of a Python
+# identifier or a dotted qualified name (e.g. "torch.cos", "fork_rng").
+# This covers question marks, exclamation points, quotes, brackets, commas,
+# colons, semicolons — anything that natural-language wrapping adds around
+# an otherwise clean symbol or keyword.
+#
+# Characters kept at token boundaries: [a-zA-Z0-9_.]
+#   · word chars (\w) cover letters, digits, and underscores
+#   · dots are kept to preserve qualified names like "torch.random.fork_rng"
+_PUNCT_BORDER: re.Pattern[str] = re.compile(r"^[^\w.]+|[^\w.]+$")
+
+
+def tokenize_query(query: str) -> list[str]:
+    """
+    Normalise a free-text query into sparse-search tokens.
+
+    This function is the **single source of truth** for query-side token
+    normalisation.  It must produce tokens that hash to the same FNV-1a
+    buckets as the keyword lists stored at index time by
+    ``extractor._build_keywords``.
+
+    Steps
+    -----
+    1. Lowercase.
+    2. Split on whitespace.
+    3. Strip any leading/trailing punctuation that is not part of a Python
+       identifier or dotted qualified name (``[a-z0-9_.]``).
+    4. Discard empty residues.
+
+    Parameters
+    ----------
+    query:
+        Raw natural-language query, e.g. ``'What is torch.cos?'``.
+
+    Returns
+    -------
+    list[str]
+        Clean tokens ready to pass to ``keywords_to_sparse``.
+
+    Examples
+    --------
+    >>> tokenize_query("What is torch.cos?")
+    ['what', 'is', 'torch.cos']
+
+    >>> tokenize_query('"fork_rng" — how does it work?')
+    ['fork_rng', 'how', 'does', 'it', 'work']
+
+    >>> tokenize_query("torch.nn.functional.relu(input)")
+    ['torch.nn.functional.relu(input']   # interior parens not stripped — fine,
+                                          # they won't match any stored keyword
+    """
+    tokens: list[str] = []
+    for raw in query.lower().split():
+        tok = _PUNCT_BORDER.sub("", raw)
+        if tok:
+            tokens.append(tok)
+    return tokens
 
 
 # ---------------------------------------------------------------------------

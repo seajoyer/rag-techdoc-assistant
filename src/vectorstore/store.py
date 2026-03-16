@@ -94,11 +94,11 @@ from qdrant_client.models import (
 try:
     from ..chunking.chunker import Chunk
     from ..embedding.embedder import BGEM3Embedder
-    from ..embedding.sparse import keywords_to_sparse
+    from ..embedding.sparse import keywords_to_sparse, tokenize_query
 except ImportError:
     from chunking.chunker import Chunk  # type: ignore[no-redef]
     from embedding.embedder import BGEM3Embedder  # type: ignore[no-redef]
-    from embedding.sparse import keywords_to_sparse  # type: ignore[no-redef]
+    from embedding.sparse import keywords_to_sparse, tokenize_query  # type: ignore[no-redef]
 
 log = logging.getLogger(__name__)
 
@@ -285,12 +285,12 @@ class QdrantDocStore:
         # --- Dense query embedding ----------------------------------------
         q_dense = self.embedder.embed([query])[0].tolist()
 
-        # --- Sparse query vector from whitespace tokens -------------------
-        # Simple tokenisation is intentional: the sparse leg is a recall
-        # booster for exact keyword matches, not a replacement for the dense
-        # semantic leg.  More sophisticated tokenisation (sub-word, stemming)
-        # rarely improves RRF results in practice for technical documentation.
-        q_tokens = [t.strip(".,;:()[]\"'") for t in query.lower().split() if t]
+        # --- Sparse query vector ------------------------------------------
+        # tokenize_query() is the single source of truth for token
+        # normalisation; it matches the rules applied at index time by
+        # extractor._build_keywords, ensuring punctuation attached to symbols
+        # (e.g. "torch.cos?") never prevents a keyword match.
+        q_tokens = tokenize_query(query)
         q_sparse_sv = keywords_to_sparse(q_tokens)
 
         candidate_limit = top_k * prefetch_multiplier
