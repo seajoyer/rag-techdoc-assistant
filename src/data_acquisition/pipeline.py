@@ -246,13 +246,18 @@ def save_page(page: DocPage, output_dir: Path) -> Path:
     return dest
 
 
-def save_index(records: Iterable[dict], index_path: Path) -> None:
-    """Append-write a JSONL metadata index (one record per line)."""
+def save_index(
+    records: Iterable[dict],
+    index_path: Path,
+    append: bool = False,
+) -> None:
+    """Write (or append to) a JSONL metadata index."""
+    mode = "a" if append else "w"
     index_path.parent.mkdir(parents=True, exist_ok=True)
-    with index_path.open("w", encoding="utf-8") as f:
+    with index_path.open(mode, encoding="utf-8") as f:
         for rec in records:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-    log.info("Index written → %s", index_path)
+    log.info("Index %s → %s", "appended to" if append else "written", index_path)
 
 
 # ---------------------------------------------------------------------------
@@ -264,6 +269,7 @@ def run_pipeline(
     max_pages: int | None = 200,
     requests_per_second: float = 2.0,
     on_page_saved: Callable[[DocPage], None] | None = None,
+    resume: bool = True,           # ← NEW
 ) -> list[DocPage]:
     """
     End-to-end data acquisition pipeline.
@@ -279,6 +285,10 @@ def run_pipeline(
     on_page_saved:
         Optional callback fired after each page is saved — useful for
         notebook progress cells, e.g. ``on_page_saved=lambda p: display(p.title)``.
+    resume:
+        True  (default) – read _index.jsonl, skip already-processed URLs,
+                          append new records to the index.
+        False           – process all URLs, overwrite the index.
 
     Returns
     -------
@@ -288,24 +298,65 @@ def run_pipeline(
     output_dir = Path(output_dir)
     index_path = output_dir / "_index.jsonl"
 
-    urls = fetch_url_list(max_pages=max_pages)
-    pages: list[DocPage] = []
+    all_urls = fetch_url_list(max_pages=max_pages)
 
-    with RateLimitedFetcher(requests_per_second=requests_per_second) as fetcher:
-        for url in tqdm(urls, desc="Acquiring docs", unit="page"):
-            page = process_page(url, fetcher)
-            if page is None:
+    if resume:
+        processed_urls = _load_processed_urls(index_path)
+        urls_to_fetch  = [u for u in all_urls if u not in processed_urls]
+        if processed_urls:
+            log.info(
+                "Resume mode: %d/%d URLs already done, fetching %d new.",
+                len(processed_urls), len(all_urls), len(urls_to_fetch),
+            )
+    else:
+        urls_to_fetch = all_urls
+
+    new_pages: list[DocPage] = []
+
+    if urls_to_fetch:
+        with RateLimitedFetcher(requests_per_second=requests_per_second) as fetcher:
+            for url in tqdm(urls_to_fetch, desc="Acquiring docs", unit="page"):
+                page = process_page(url, fetcher)
+                if page is None:
+                    continue
+                save_page(page, output_dir)
+                new_pages.append(page)
+                if on_page_saved:
+                    on_page_saved(page)
+
+        save_index(
+            (p.to_index_record() for p in new_pages),
+            index_path,
+            append=resume,
+        )
+        _log_summary(new_pages)
+    else:
+        log.info("No new URLs to fetch — all already processed.")
+
+    return load_pages_from_disk(output_dir)
+
+
+def _load_processed_urls(index_path: Path) -> set[str]:
+    """
+    Return the set of URLs already recorded in _index.jsonl.
+    Returns an empty set when the file does not yet exist — so the first
+    run and a resumed-with-no-prior-state run behave identically.
+    """
+    if not index_path.exists():
+        return set()
+    urls: set[str] = set()
+    with index_path.open(encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
                 continue
-
-            save_page(page, output_dir)
-            pages.append(page)
-
-            if on_page_saved:
-                on_page_saved(page)
-
-    save_index((p.to_index_record() for p in pages), index_path)
-    _log_summary(pages)
-    return pages
+            try:
+                rec = json.loads(line)
+                if "url" in rec:
+                    urls.add(rec["url"])
+            except json.JSONDecodeError:
+                pass
+    return urls
 
 
 # ---------------------------------------------------------------------------
