@@ -265,7 +265,7 @@ def save_index(
 # ---------------------------------------------------------------------------
 
 def run_pipeline(
-    output_dir: str | Path = "pytorch_docs_md",
+    output_dir: str | Path = "pytorch_docs",
     max_pages: int | None = 200,
     requests_per_second: float = 2.0,
     on_page_saved: Callable[[DocPage], None] | None = None,

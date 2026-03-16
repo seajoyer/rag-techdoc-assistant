@@ -6,24 +6,35 @@ A retrieval-augmented generation (RAG) system that answers questions about PyTor
 
 ## How It Works
 
-```
-Question
-   │
-   ▼
-[HyDE Transformer]          ← optional: generate a hypothetical doc snippet
-   │                           for the dense leg (improves recall for
-   │                           conversational questions)
-   ├─── dense leg ──────────→ BGE-M3 embedding → Qdrant ANN search
-   └─── sparse leg ─────────→ FNV-1a feature hash → Qdrant IDF keyword search
-                                      │
-                              [RRF Fusion + Dedup]
-                                      │
-                              top-k ranked chunks
-                                      │
-                              [Groq – LLaMA 3.3 70B]
-                                      │
-                              Answer with [N] citations
-                              + resolved source URLs
+```mermaid
+flowchart TD
+    Q([🔍 User Question]):::input
+
+    Q --> HyDE["<b>HyDE Transformer</b><br/><i>Generate hypothetical doc snippet</i><br/><i>to improve dense recall</i>"]:::optional
+
+    HyDE --> D["<b>Dense Leg</b><br/>BGE-M3 Embedding"]:::leg
+    Q     --> S["<b>Sparse Leg</b><br/>FNV-1a Feature Hash"]:::leg
+
+    D --> QD["Qdrant — ANN Semantic Search"]:::store
+    S --> QS["Qdrant — IDF Keyword Search"]:::store
+
+    QD --> RRF["<b>RRF Fusion + Dedup</b><br/>Reciprocal Rank Fusion"]:::fusion
+    QS --> RRF
+
+    RRF --> K["Top-k Ranked Chunks"]:::chunks
+
+    K --> LLM["<b>Groq · LLaMA 3.3 70B</b>"]:::llm
+
+    LLM --> A([💬 Answer with Citations + Source URLs]):::output
+
+    classDef input     fill:#e8f4fd,stroke:#2196F3,stroke-width:2px,color:#0d47a1,font-weight:bold
+    classDef optional  fill:#fff8e1,stroke:#FFC107,stroke-width:1.5px,stroke-dasharray:5 4,color:#5d4037
+    classDef leg       fill:#f3e5f5,stroke:#9C27B0,stroke-width:1.5px,color:#4a148c
+    classDef store     fill:#e8f5e9,stroke:#4CAF50,stroke-width:1.5px,color:#1b5e20
+    classDef fusion    fill:#fce4ec,stroke:#E91E63,stroke-width:2px,color:#880e4f,font-weight:bold
+    classDef chunks    fill:#e3f2fd,stroke:#1565C0,stroke-width:1.5px,color:#0d47a1
+    classDef llm       fill:#ede7f6,stroke:#673AB7,stroke-width:2px,color:#311b92,font-weight:bold
+    classDef output    fill:#e8f4fd,stroke:#2196F3,stroke-width:2px,color:#0d47a1,font-weight:bold
 ```
 
 The pipeline is split into four sequential stages, each with its own notebook:
@@ -41,43 +52,43 @@ The pipeline is split into four sequential stages, each with its own notebook:
 
 ```
 rag-techdoc-assistant/
+├── devenv.nix                # devenv shell & package configuration
+├── devenv.yaml               # devenv inputs / follows
+├── pyproject.toml            # project metadata & dependencies (uv)
+├── .env                      # secrets (not committed)
+├── LICENSE
+│
 ├── notebooks/
 │   ├── 01_data_acquisition.ipynb
 │   ├── 02_chunking.ipynb
 │   ├── 03_embedding_ingestion.ipynb
 │   └── 04_rag_chain.ipynb
 │
-├── src/
-│   ├── data_acquisition/
-│   │   ├── discovery.py      # sitemap crawl → URL list
-│   │   ├── fetcher.py        # rate-limited HTTP fetcher
-│   │   ├── cleaner.py        # strip UI chrome, Pygments spans
-│   │   ├── extractor.py      # structural markers (headings, API symbols)
-│   │   ├── converter.py      # HTML → Markdown with section comments
-│   │   └── pipeline.py       # DocPage dataclass + orchestration
-│   │
-│   ├── chunking/
-│   │   └── chunker.py        # ChunkSplitter + Chunk dataclass
-│   │
-│   ├── embedding/
-│   │   ├── embedder.py       # BGEM3Embedder (local CUDA / CPU)
-│   │   ├── sparse.py         # feature-hashed sparse vectors
-│   │   └── cache.py          # vector cache to avoid re-embedding
-│   │
-│   ├── retrieval/
-│   │   └── hyde.py           # HyDE query transformer
-│   │
-│   ├── vectorstore/
-│   │   └── store.py          # QdrantDocStore + HybridQdrantRetriever
-│   │
-│   └── rag/
-│       └── chain.py          # build_rag_chain, RAGResult, SourceRef
-│
-├── data/
-│   └── pytorch_docs_md/      # generated — .md files + _index.jsonl
-│
-├── .env                      # secrets (not committed)
-└── requirements.txt
+└── src/
+    ├── data_acquisition/
+    │   ├── discovery.py      # sitemap crawl → URL list
+    │   ├── fetcher.py        # rate-limited HTTP fetcher
+    │   ├── cleaner.py        # strip UI chrome, Pygments spans
+    │   ├── extractor.py      # structural markers (headings, API symbols)
+    │   ├── converter.py      # HTML → Markdown with section comments
+    │   └── pipeline.py       # DocPage dataclass + orchestration
+    │
+    ├── chunking/
+    │   └── chunker.py        # ChunkSplitter + Chunk dataclass
+    │
+    ├── embedding/
+    │   ├── embedder.py       # BGEM3Embedder (local CUDA / CPU)
+    │   ├── sparse.py         # feature-hashed sparse vectors
+    │   └── cache.py          # vector cache to avoid re-embedding
+    │
+    ├── retrieval/
+    │   └── hyde.py           # HyDE query transformer
+    │
+    ├── vectorstore/
+    │   └── store.py          # QdrantDocStore + HybridQdrantRetriever
+    │
+    └── rag/
+        └── chain.py          # build_rag_chain, RAGResult, SourceRef
 ```
 
 ---
@@ -99,13 +110,17 @@ rag-techdoc-assistant/
 
 ## Setup
 
-### 1. Install dependencies
+### 1. Enter the development shell
+
+This project uses [devenv](https://devenv.sh) to provide a fully reproducible environment. With devenv installed, run:
 
 ```bash
-pip install -r requirements.txt
+devenv shell
 ```
 
-> BGE-M3 requires `FlagEmbedding`. On first run it downloads ~2.2 GB of weights from HuggingFace Hub. A CUDA-capable GPU is recommended for embedding; CPU works but is significantly slower.
+This drops you into a shell with the correct Python version and all dependencies — including `uv` — already available. Dependencies are declared in `pyproject.toml` and resolved by uv.
+
+> BGE-M3 requires `FlagEmbedding`. On first run it downloads ~2.2 GB of weights from HuggingFace Hub into `models/`. A CUDA-capable GPU is recommended for embedding; CPU works but is significantly slower.
 
 ### 2. Configure environment variables
 
@@ -183,19 +198,14 @@ Output:
 
 ```
 ========================================================================
-torch.autograd.grad(*outputs, inputs, ...) computes and returns the
-gradients as tensors without modifying .grad [1]. Unlike .backward(),
-which accumulates gradients into the .grad attributes of leaf tensors [2],
-grad() is stateless and suitable for higher-order differentiation [1][3].
+torch.autograd.grad differs from calling .backward() in that it computes and returns the gradients of the outputs with respect to the inputs, rather than accumulating them in the `.grad` attribute of the inputs [1]. In contrast, .backward() accumulates the gradients in the leaves of the graph [2]. Additionally, torch.autograd.grad allows for more fine-grained control over the computation of gradients, such as specifying the `grad_outputs` and `retain_graph` arguments [1], whereas .backward() requires specifying `grad_tensors` and `retain_graph` arguments [2]. It is also noted that using torch.autograd.grad is recommended over using .backward() with `create_graph=True` to avoid memory leaks [2].
 
 Sources
 ----------------------------------------
   [1] torch.autograd.grad
        https://docs.pytorch.org/docs/stable/generated/torch.autograd.grad.html#torch.autograd.grad
-  [2] Autograd mechanics
-       https://docs.pytorch.org/docs/stable/notes/autograd.html#autograd-mechanics
-  [3] torch.autograd
-       https://docs.pytorch.org/docs/stable/autograd.html#module-torch.autograd
+  [2] torch.autograd.backward
+       https://docs.pytorch.org/docs/stable/generated/torch.autograd.backward.html#torch.autograd.backward
 ========================================================================
 ```
 
