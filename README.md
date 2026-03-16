@@ -112,23 +112,39 @@ rag-techdoc-assistant/
 
 ### 1. Enter the development shell
 
-This project uses [devenv](https://devenv.sh) to provide a fully reproducible environment, with [direnv](https://direnv.net) for automatic shell activation.
+This project uses **[devenv](https://devenv.sh)** to provide a fully reproducible environment, with **[direnv](https://direnv.net)** for automatic shell activation.
 
-**With direnv (recommended):** Allow the `.envrc` once and the devenv shell activates automatically whenever you enter the project directory:
+#### Option A – With direnv (recommended)
 
-```bash
-direnv allow
-```
+1. Allow the `.envrc` file once:
 
-**Without direnv:** Enter the shell manually:
+   ```bash
+   direnv allow
+   ```
+
+2. → The devenv shell will **automatically activate** whenever you enter the project directory.
+
+#### Option B – Without direnv (manual activation)
+
+Run this command whenever you want to enter the environment:
 
 ```bash
 devenv shell
 ```
 
-Either way, you will have the correct Python version and all dependencies — including `uv` — available. Dependencies are declared in `pyproject.toml` and resolved by uv.
+→ Either way (A or B), you will have:
+- the correct Python version
+- all dependencies (including `uv`)
+- packages declared in `pyproject.toml` and resolved by `uv`
 
-**Without devenv:** Ensure you have Python 3.12 and [uv](https://docs.astral.sh/uv/) installed, then install dependencies directly:
+#### Option C – Without devenv at all
+
+Make sure you have the following installed manually:
+
+- **Python 3.12**
+- **[uv](https://docs.astral.sh/uv/)**
+
+Then install the project dependencies directly:
 
 ```bash
 uv sync
