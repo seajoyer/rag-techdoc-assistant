@@ -37,6 +37,27 @@ Hybrid search with RRF fusion
 Reciprocal Rank Fusion is parameter-free and robust across different
 vector score distributions, making it a safe default for hybrid retrieval.
 
+Split-channel HyDE
+~~~~~~~~~~~~~~~~~~
+``hybrid_search()`` accepts an optional ``dense_query`` override.  When
+provided (by ``HybridQdrantRetriever`` with an attached ``HyDETransformer``),
+the dense leg embeds this text instead of the raw query.  The sparse leg
+always uses the original query for exact keyword matching.
+
+    dense leg  → embed(dense_query or query)    # HyDE snippet if available
+    sparse leg → tokenize(query)                # always the original question
+
+This split-channel design maximises both legs:
+* Dense recalls semantically similar chunks even for conversational questions.
+* Sparse catches exact symbol names that appear verbatim in the question.
+
+Deduplication
+~~~~~~~~~~~~~
+``HybridQdrantRetriever._get_relevant_documents`` deduplicates results so
+that the same PyTorch symbol never occupies more than one slot in the
+returned list.  Continuation sub-chunks (sub_index > 0) that score below
+their primary chunk are dropped, keeping the context window clean.
+
 LangChain integration
 ~~~~~~~~~~~~~~~~~~~~~
 ``QdrantDocStore.as_retriever()`` returns a ``HybridQdrantRetriever``
@@ -95,10 +116,12 @@ try:
     from ..chunking.chunker import Chunk
     from ..embedding.embedder import BGEM3Embedder
     from ..embedding.sparse import keywords_to_sparse, tokenize_query
+    from ..retrieval.hyde import HyDETransformer
 except ImportError:
     from chunking.chunker import Chunk  # type: ignore[no-redef]
     from embedding.embedder import BGEM3Embedder  # type: ignore[no-redef]
     from embedding.sparse import keywords_to_sparse, tokenize_query  # type: ignore[no-redef]
+    from retrieval.hyde import HyDETransformer  # type: ignore[no-redef]
 
 log = logging.getLogger(__name__)
 
@@ -167,19 +190,16 @@ class QdrantDocStore:
                 DENSE_VECTOR: VectorParams(
                     size=DENSE_DIM,
                     distance=Distance.COSINE,
-                    on_disk=True,           # mmap for large collections
+                    on_disk=True,
                 )
             },
             sparse_vectors_config={
                 SPARSE_VECTOR: SparseVectorParams(
-                    # IDF normalisation is applied to query vectors at search
-                    # time.  Document vectors carry raw TF weights.
                     modifier=models.Modifier.IDF,
                 )
             },
-            # Optimiser / indexing settings tuned for a ~50 k-point collection
             optimizers_config=models.OptimizersConfigDiff(
-                indexing_threshold=10_000,  # build HNSW after 10k points
+                indexing_threshold=10_000,
             ),
             hnsw_config=models.HnswConfigDiff(
                 m=16,
@@ -259,17 +279,15 @@ class QdrantDocStore:
         top_k: int = 6,
         filter_: models.Filter | None = None,
         prefetch_multiplier: int = 3,
+        dense_query: str | None = None,
     ) -> list[tuple[dict, float]]:
         """
         Hybrid dense + sparse search with RRF fusion.
 
-        The query is embedded with BGE-M3 for the dense leg, and tokenised
-        by whitespace with the same feature hash for the sparse leg.
-
         Parameters
         ----------
         query:
-            Natural-language query string.
+            Natural-language query string.  Always used for sparse tokenisation.
         top_k:
             Number of results to return after fusion.
         filter_:
@@ -277,19 +295,30 @@ class QdrantDocStore:
         prefetch_multiplier:
             Each leg fetches ``top_k * prefetch_multiplier`` candidates
             before fusion.
+        dense_query:
+            If provided, embed *this* text for the dense leg instead of
+            *query*.  Pass a HyDE-generated hypothetical snippet here to
+            bridge the distributional gap between conversational questions
+            and terse API reference chunks.
+
+            The sparse leg always uses *query* regardless of this parameter,
+            because exact keyword matching works best with the original question.
 
         Returns
         -------
         list of (payload_dict, rrf_score) tuples, highest score first.
         """
         # --- Dense query embedding ----------------------------------------
-        q_dense = self.embedder.embed([query])[0].tolist()
+        # Use the override (e.g. a HyDE snippet) when provided; fall back to
+        # the original query otherwise.
+        embed_text = dense_query if dense_query is not None else query
+        q_dense = self.embedder.embed([embed_text])[0].tolist()
 
         # --- Sparse query vector ------------------------------------------
         # tokenize_query() is the single source of truth for token
         # normalisation; it matches the rules applied at index time by
         # extractor._build_keywords, ensuring punctuation attached to symbols
-        # (e.g. "torch.cos?") never prevents a keyword match.
+        # (e.g. "torch.cos?" or ".backward()") never prevents a keyword match.
         q_tokens = tokenize_query(query)
         q_sparse_sv = keywords_to_sparse(q_tokens)
 
@@ -330,6 +359,7 @@ class QdrantDocStore:
         top_k: int = 6,
         filter_: models.Filter | None = None,
         score_threshold: float | None = None,
+        hyde: "HyDETransformer | None" = None,
     ) -> "HybridQdrantRetriever":
         """
         Return a LangChain ``BaseRetriever`` backed by this store.
@@ -342,6 +372,11 @@ class QdrantDocStore:
             Optional Qdrant payload filter (section, kind, symbol, etc.).
         score_threshold:
             Drop results with RRF score below this value.  None = keep all.
+        hyde:
+            Optional ``HyDETransformer`` instance.  When set, the retriever
+            generates a hypothetical documentation snippet before each search
+            and uses it for the dense embedding leg, improving recall for
+            natural-language questions.
 
         Returns
         -------
@@ -353,6 +388,7 @@ class QdrantDocStore:
             top_k=top_k,
             filter_=filter_,
             score_threshold=score_threshold,
+            hyde=hyde,
         )
 
 
@@ -371,12 +407,26 @@ class HybridQdrantRetriever(BaseRetriever):
 
     The ``citation_url`` and ``symbol`` fields in metadata make it easy to
     build source-attributed answers in the downstream LLM chain.
+
+    Deduplication
+    ~~~~~~~~~~~~~
+    Results are deduplicated by symbol name before being returned.  If the
+    same PyTorch symbol appears in multiple sub-chunks (continuation splits),
+    only the highest-scored chunk is kept.  Heading/prose chunks are
+    deduplicated by (page_url, section) pair.
+
+    HyDE
+    ~~~~
+    When ``hyde`` is set, each query is first transformed into a hypothetical
+    documentation snippet (via a fast LLM call to Groq).  That snippet is
+    embedded for the dense leg; the original query is used for sparse search.
     """
 
     store: Any = Field(repr=False)
     top_k: int = 6
     filter_: Any = Field(default=None, repr=False)
     score_threshold: float | None = None
+    hyde: Any = Field(default=None, repr=False)   # HyDETransformer | None
 
     class Config:
         arbitrary_types_allowed = True
@@ -387,19 +437,51 @@ class HybridQdrantRetriever(BaseRetriever):
         *,
         run_manager: CallbackManagerForRetrieverRun,
     ) -> list[Document]:
+        # -- HyDE: generate a hypothetical snippet for the dense leg ---------
+        dense_query: str | None = None
+        if self.hyde is not None:
+            dense_query = self.hyde.transform(query)
+            log.debug("HyDE dense_query: %r", dense_query[:80] if dense_query else None)
+
         results = self.store.hybrid_search(
             query=query,
             top_k=self.top_k,
             filter_=self.filter_,
+            dense_query=dense_query,
         )
+
+        # -- Deduplication: one chunk per symbol / prose section -------------
+        # RRF can return multiple sub-chunks of the same symbol (sub_index 0
+        # and 1 from oversized section splitting).  Keep only the best-scored
+        # chunk per identity key so the context window stays clean.
+        seen: set[str] = set()
         docs: list[Document] = []
+
         for payload, score in results:
             if self.score_threshold is not None and score < self.score_threshold:
                 continue
+
+            symbol = payload.get("symbol", "")
+            if symbol:
+                # One entry per fully-qualified API symbol.
+                dedup_key = symbol
+            else:
+                # For prose/heading chunks, deduplicate by page + section.
+                dedup_key = (
+                    payload.get("page_url", "")
+                    + "|"
+                    + payload.get("section", "")
+                )
+
+            if dedup_key in seen:
+                continue
+            seen.add(dedup_key)
+
             text = payload.get("text", "")
             meta = {k: v for k, v in payload.items() if k != "text"}
             meta["score"] = score
             docs.append(Document(page_content=text, metadata=meta))
+
         return docs
 
 

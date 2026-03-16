@@ -82,16 +82,28 @@ VOCAB_SIZE: int = 2**17
 # Token normalisation
 # ---------------------------------------------------------------------------
 
-# Strips any leading/trailing characters that are *not* part of a Python
-# identifier or a dotted qualified name (e.g. "torch.cos", "fork_rng").
-# This covers question marks, exclamation points, quotes, brackets, commas,
-# colons, semicolons — anything that natural-language wrapping adds around
-# an otherwise clean symbol or keyword.
+# Strips leading characters that are NOT part of a Python identifier or
+# dotted qualified name.  Crucially, the leading-strip arm uses ``[^\w]+``
+# (no dot exception) while the trailing-strip arm uses ``[^\w.]+$`` (dots
+# kept so qualified names like "torch.random.fork_rng" survive trailing noise).
 #
-# Characters kept at token boundaries: [a-zA-Z0-9_.]
+# Why the asymmetry?
+#   Leading dots are Python method-call syntax (".backward()"), not part of
+#   a valid Python name.  They appear in queries like "calling .backward()"
+#   and must be stripped so ".backward" → "backward", matching the stored
+#   keyword.
+#
+#   Trailing dots DO occur in qualified names ("torch.nn.") and are harmless
+#   noise — keeping them in the trailing rule avoids false stripping of the
+#   dot that separates a method name from its module prefix in edge cases.
+#
+# Characters kept at token boundaries (trailing side only): [a-zA-Z0-9_.]
 #   · word chars (\w) cover letters, digits, and underscores
 #   · dots are kept to preserve qualified names like "torch.random.fork_rng"
-_PUNCT_BORDER: re.Pattern[str] = re.compile(r"^[^\w.]+|[^\w.]+$")
+#
+# FIX (vs original): original used ``^[^\w.]+`` which kept leading dots,
+# causing ".backward" to not match stored keyword "backward".
+_PUNCT_BORDER: re.Pattern[str] = re.compile(r"^[^\w]+|[^\w.]+$")
 
 
 def tokenize_query(query: str) -> list[str]:
@@ -107,8 +119,10 @@ def tokenize_query(query: str) -> list[str]:
     -----
     1. Lowercase.
     2. Split on whitespace.
-    3. Strip any leading/trailing punctuation that is not part of a Python
-       identifier or dotted qualified name (``[a-z0-9_.]``).
+    3. Strip any leading punctuation and trailing punctuation that is not
+       part of a Python identifier or dotted qualified name.
+       Leading dots are stripped (method-call syntax fix).
+       Trailing dots are preserved (qualified-name safety).
     4. Discard empty residues.
 
     Parameters
@@ -129,9 +143,11 @@ def tokenize_query(query: str) -> list[str]:
     >>> tokenize_query('"fork_rng" — how does it work?')
     ['fork_rng', 'how', 'does', 'it', 'work']
 
+    >>> tokenize_query("torch.autograd.grad differ from calling .backward()?")
+    ['torch.autograd.grad', 'differ', 'from', 'calling', 'backward']
+
     >>> tokenize_query("torch.nn.functional.relu(input)")
-    ['torch.nn.functional.relu(input']   # interior parens not stripped — fine,
-                                          # they won't match any stored keyword
+    ['torch.nn.functional.relu']
     """
     tokens: list[str] = []
     for raw in query.lower().split():
@@ -161,45 +177,42 @@ def keywords_to_sparse(keywords: list[str]) -> SparseVector:
     Parameters
     ----------
     keywords:
-        Token strings.  Typically ``Chunk.keywords`` — module components,
-        symbol names, parameter names, and heading words.
+        Token strings.
 
     Returns
     -------
     SparseVector
-        Parallel ``indices`` / ``values`` lists sorted by index, suitable
-        for ``QdrantSparseVector(indices=…, values=…)``.
-        Returns empty lists when *keywords* is empty.
+        ``indices``: feature-hashed bucket indices (deduplicated, sorted).
+        ``values``:  raw term-frequency float weights.
     """
-    if not keywords:
-        return SparseVector([], [])
+    counts: dict[int, float] = {}
+    for kw in keywords:
+        idx = _fnv1a(kw) % VOCAB_SIZE
+        counts[idx] = counts.get(idx, 0.0) + 1.0
 
-    # Accumulate raw term frequencies per bucket
-    tf: dict[int, float] = {}
-    for token in keywords:
-        idx = _fnv1a_hash(token)
-        tf[idx] = tf.get(idx, 0.0) + 1.0
+    if not counts:
+        return SparseVector(indices=[], values=[])
 
-    # Sort by index (Qdrant requires sorted sparse vectors)
-    indices = sorted(tf)
-    values = [tf[i] for i in indices]
-    return SparseVector(indices, values)
+    pairs = sorted(counts.items())
+    return SparseVector(
+        indices=[i for i, _ in pairs],
+        values=[v for _, v in pairs],
+    )
 
 
 # ---------------------------------------------------------------------------
-# Hashing
+# Internal
 # ---------------------------------------------------------------------------
 
-def _fnv1a_hash(token: str) -> int:
+def _fnv1a(s: str) -> int:
     """
-    FNV-1a 32-bit hash, mapped into [0, VOCAB_SIZE).
+    FNV-1a 32-bit hash of a UTF-8 string.
 
-    FNV-1a is simple, fast, has no external dependencies, and distributes
-    natural-language tokens well.  The modulo step into VOCAB_SIZE may
-    introduce secondary collisions but these are negligible at 2^17.
+    Deterministic, parameter-free, no seed — identical results across Python
+    versions, platforms, and process restarts.
     """
-    h = 2_166_136_261  # FNV offset basis (32-bit)
-    for byte in token.encode("utf-8"):
-        h ^= byte
-        h = (h * 16_777_619) & 0xFFFF_FFFF  # FNV prime, keep 32-bit
-    return h % VOCAB_SIZE
+    h = 0x811C9DC5
+    for b in s.encode():
+        h ^= b
+        h = (h * 0x01000193) & 0xFFFFFFFF
+    return h
