@@ -27,32 +27,37 @@ from .pipeline import (
     build_summary,
 )
 
-from . import cleaner, converter, discovery, fetcher, pipeline
+from .extractor import (
+    PageMarkers,
+    SectionMarker,
+    extract_markers,
+)
+
+from . import cleaner, converter, discovery, fetcher, extractor, pipeline
 
 __all__ = [
-    # Discovery
     "fetch_url_list",
     "SITEMAP_URL",
+    "load_pages_from_disk",
     "DEFAULT_SKIP_PATTERNS",
-    # Fetcher
     "RateLimitedFetcher",
-    # Cleaner
     "extract_title",
     "clean_html",
     "extract_main_content",
-    # Converter
     "html_to_markdown",
-    # Pipeline
     "DocPage",
     "process_page",
     "save_page",
     "save_index",
     "run_pipeline",
     "build_summary",
-    # Submodules
     "cleaner",
     "converter",
     "discovery",
     "fetcher",
     "pipeline",
+    "extractor",
+    "PageMarkers",
+    "SectionMarker",
+    "extract_markers",
 ]

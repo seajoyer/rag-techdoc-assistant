@@ -251,7 +251,6 @@ def build_rag_chain(
     model: str = "llama-3.3-70b-versatile",
     temperature: float = 0.0,
     max_tokens: int = 1024,
-    top_k: int = 6,
     streaming: bool = False,
 ) -> Any:
     """
@@ -338,9 +337,7 @@ def build_rag_chain(
         chain = (
             retrieve_step
             | format_step
-            | (
-                lambda x: {"context": x["context"], "question": x["question"]}
-            )
+            | RunnableLambda(lambda x: {"context": x["context"], "question": x["question"]})
             | _PROMPT
             | llm
             | StrOutputParser()

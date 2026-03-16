@@ -99,6 +99,7 @@ import uuid
 from typing import Any, Sequence
 
 import numpy as np
+from pydantic import ConfigDict
 from langchain_core.callbacks import CallbackManagerForRetrieverRun
 from langchain_core.documents import Document
 from langchain_core.retrievers import BaseRetriever
@@ -216,7 +217,7 @@ class QdrantDocStore:
             "name": self.collection_name,
             "points_count": info.points_count,
             "indexed_vectors_count": info.indexed_vectors_count,
-            "status": info.status,
+            "status": info.status.value,
         }
 
     # ------------------------------------------------------------------
@@ -421,15 +422,12 @@ class HybridQdrantRetriever(BaseRetriever):
     documentation snippet (via a fast LLM call to Groq).  That snippet is
     embedded for the dense leg; the original query is used for sparse search.
     """
-
-    store: Any = Field(repr=False)
     top_k: int = 6
-    filter_: Any = Field(default=None, repr=False)
+    store: QdrantDocStore = Field(repr=False)
+    hyde: HyDETransformer | None = Field(default=None, repr=False)
+    filter_: models.Filter | None = Field(default=None, repr=False)
     score_threshold: float | None = None
-    hyde: Any = Field(default=None, repr=False)   # HyDETransformer | None
-
-    class Config:
-        arbitrary_types_allowed = True
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
     def _get_relevant_documents(
         self,
@@ -507,19 +505,3 @@ def _chunk_to_point(chunk: Chunk, dense_vec: np.ndarray) -> PointStruct:
         },
         payload=chunk.to_dict(),  # includes text, citation_url, kind, etc.
     )
-
-
-def show_results(store, query: str, top_k: int = 4) -> None:
-    results = store.hybrid_search(query, top_k=top_k)
-    print(f"Query: {query!r}\n")
-    print(f"{'#':<3} {'Score':>6}  {'Kind':<12} {'Symbol / Title':<35} Citation")
-    print("─" * 110)
-    for i, (payload, score) in enumerate(results, 1):
-        label = payload.get("symbol") or payload.get("page_title", "—")
-        print(
-            f"{i:<3} {score:>6.4f}  "
-            f"{payload.get('kind', '?'):<12} "
-            f"{label[:45]:<35} "
-            f"{payload.get('citation_url', '')}"
-        )
-    print()

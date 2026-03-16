@@ -97,7 +97,7 @@ class RateLimitedFetcher:
     def __enter__(self) -> "RateLimitedFetcher":
         return self
 
-    def __exit__(self, *_) -> None:
+    def __exit__(self, *_: object) -> None:
         self.close()
 
     # ------------------------------------------------------------------

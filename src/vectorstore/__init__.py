@@ -1,6 +1,4 @@
-from .store import QdrantDocStore, show_results
+from .store import QdrantDocStore, HybridQdrantRetriever
+from .utils import show_results
 
-__all__ = [
-    "QdrantDocStore",
-    "show_results",
-]
+__all__ = ["QdrantDocStore", "HybridQdrantRetriever", "show_results"]
