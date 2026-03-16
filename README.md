@@ -112,43 +112,27 @@ rag-techdoc-assistant/
 
 ### 1. Enter the development shell
 
-This project uses **[devenv](https://devenv.sh)** to provide a fully reproducible environment, with **[direnv](https://direnv.net)** for automatic shell activation.
+This project uses [devenv](https://devenv.sh) to provide a fully reproducible environment, with [direnv](https://direnv.net) for automatic shell activation.
 
-#### Option A – With direnv (recommended)
+* **With direnv (recommended):** Allow the `.envrc` once and the devenv shell activates automatically whenever you enter the project directory:
 
-1. Allow the `.envrc` file once:
+    ```bash
+    direnv allow
+    ```
 
-   ```bash
-   direnv allow
-   ```
+* **Without direnv:** Enter the shell manually:
 
-2. → The devenv shell will **automatically activate** whenever you enter the project directory.
+    ```bash
+    devenv shell
+    ```
 
-#### Option B – Without direnv (manual activation)
+    Either way, you will have the correct Python version and all dependencies, including `uv`.
 
-Run this command whenever you want to enter the environment:
+* **Without devenv:** Ensure you have Python 3.12 and [uv](https://docs.astral.sh/uv/) installed, then install dependencies directly:
 
-```bash
-devenv shell
-```
-
-→ Either way (A or B), you will have:
-- the correct Python version
-- all dependencies (including `uv`)
-- packages declared in `pyproject.toml` and resolved by `uv`
-
-#### Option C – Without devenv at all
-
-Make sure you have the following installed manually:
-
-- **Python 3.12**
-- **[uv](https://docs.astral.sh/uv/)**
-
-Then install the project dependencies directly:
-
-```bash
-uv sync
-```
+    ```bash
+    uv sync
+    ```
 
 > BGE-M3 requires `FlagEmbedding`. On first run it downloads ~2.2 GB of weights from HuggingFace Hub into `models/`. A CUDA-capable GPU is recommended for embedding; CPU works but is significantly slower.
 
@@ -227,8 +211,19 @@ print_result(result)
 Output:
 
 ```
-========================================================================
-torch.autograd.grad differs from calling .backward() in that it computes and returns the gradients of the outputs with respect to the inputs, rather than accumulating them in the `.grad` attribute of the inputs [1]. In contrast, .backward() accumulates the gradients in the leaves of the graph [2]. Additionally, torch.autograd.grad allows for more fine-grained control over the computation of gradients, such as specifying the `grad_outputs` and `retain_graph` arguments [1], whereas .backward() requires specifying `grad_tensors` and `retain_graph` arguments [2]. It is also noted that using torch.autograd.grad is recommended over using .backward() with `create_graph=True` to avoid memory leaks [2].
+torch.autograd.grad differs from calling .backward() in that it computes
+and returns the gradients of the outputs with respect to the inputs,
+rather than accumulating them in the `.grad` attribute of the inputs [1].
+In contrast, .backward() accumulates the gradients in the leaves of the
+graph [2].
+
+Additionally, torch.autograd.grad allows for more fine-grained
+control over the computation of gradients, such as specifying the
+`grad_outputs` and `retain_graph` arguments [1], whereas .backward()
+requires specifying `grad_tensors` and `retain_graph` arguments [2].
+
+It is also noted that using torch.autograd.grad is recommended over using
+.backward() with `create_graph=True` to avoid memory leaks [2].
 
 Sources
 ----------------------------------------
@@ -236,7 +231,6 @@ Sources
        https://docs.pytorch.org/docs/stable/generated/torch.autograd.grad.html#torch.autograd.grad
   [2] torch.autograd.backward
        https://docs.pytorch.org/docs/stable/generated/torch.autograd.backward.html#torch.autograd.backward
-========================================================================
 ```
 
 ---
