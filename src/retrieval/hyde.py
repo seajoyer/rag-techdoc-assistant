@@ -3,52 +3,14 @@ hyde.py
 -------
 Hypothetical Document Embeddings (HyDE) query transformer for documentation RAG.
 
-Problem it solves
-~~~~~~~~~~~~~~~~~
-BGE-M3 embeds a natural-language question ("How does torch.autograd.grad differ
-from .backward()?") into a very different region of the 1024-d vector space than
-a terse API reference chunk ("torch.autograd.grad(*outputs, ...) — Computes
-and returns the sum of gradients...").  The question framing dilutes the key
-symbol tokens, so the nearest-neighbour search misses the relevant chunk entirely.
-
-How HyDE works
-~~~~~~~~~~~~~~
-Instead of embedding the raw question, we ask an LLM to write a short
-*hypothetical documentation snippet* that would directly answer the question.
-That snippet "sounds like" a real doc chunk — terse, symbol-centric, reference
-style — so its embedding lands in the same neighbourhood as the actual chunk.
-
 Split-channel design
 ~~~~~~~~~~~~~~~~~~~~
 This module is used **only for the dense embedding leg** of the hybrid search.
-The sparse (keyword IDF) leg keeps the original query, because:
-
-* The sparse leg already excels at exact symbol matching when the symbol appears
-  verbatim in the question.
-* A hypothetical snippet may introduce new tokens not in the original query,
-  which could inflate sparse recall for the wrong chunks.
+The sparse (keyword IDF) leg keeps the original query.
 
 Using different representations for each leg is the key insight:
     dense leg  → embed(hypothetical_snippet)  # catches semantic similarity
     sparse leg → tokenize(original_query)     # catches exact keyword matches
-
-Usage
-~~~~~
-::
-
-    from src.retrieval.hyde import HyDETransformer
-
-    hyde = HyDETransformer(groq_api_key="gsk_...")
-
-    # Returns a short documentation-style snippet:
-    snippet = hyde.transform("How does torch.autograd.grad differ from .backward()?")
-    # → "torch.autograd.grad(*outputs, inputs, grad_outputs=None, ...) computes
-    #    and returns the sum of gradients of outputs with respect to the inputs.
-    #    Unlike .backward(), which accumulates gradients into .grad attributes,
-    #    grad() returns the gradients as tensors and does not modify .grad."
-
-    # The snippet is then embedded (in QdrantDocStore.hybrid_search) and used
-    # as the dense query vector, while the original question is used for sparse.
 
 Error handling
 ~~~~~~~~~~~~~~
@@ -136,6 +98,7 @@ class HyDETransformer:
             Hypothetical documentation snippet (3–6 sentences), or *query*
             on failure.
         """
+        log.info("[HyDE] Generating hypothetical snippet | model=%s | query=%r", self.model, query)
         try:
             response = self._client.chat.completions.create(
                 model=self.model,
@@ -149,14 +112,17 @@ class HyDETransformer:
             )
             snippet = response.choices[0].message.content.strip()
             if not snippet:
-                log.warning("HyDETransformer: empty response — falling back to raw query")
+                log.warning("[HyDE] Empty response from model — falling back to raw query")
                 return query
-            log.debug("HyDE snippet for %r: %r", query[:60], snippet[:120])
+            usage = response.usage
+            log.info(
+                "[HyDE] Snippet generated | tokens_in=%d tokens_out=%d | snippet=%r",
+                usage.prompt_tokens if usage else -1,
+                usage.completion_tokens if usage else -1,
+                snippet,
+            )
             return snippet
 
         except Exception as exc:
-            log.warning(
-                "HyDETransformer: API error (%s) — falling back to raw query",
-                exc,
-            )
+            log.warning("[HyDE] API error (%s) — falling back to raw query", exc)
             return query

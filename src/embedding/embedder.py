@@ -5,27 +5,6 @@ Dense text embeddings via BAAI/bge-m3 running locally on CUDA (or CPU).
 
 Drop-in replacement for the original HuggingFace Inference-API embedder.
 Public interface is identical — nothing else in the project needs to change.
-
-Requires
---------
-    pip install FlagEmbedding
-
-The model weights (~2.2 GB) are downloaded from HuggingFace Hub on first
-use and cached in ~/.cache/huggingface/.
-
-Why FlagEmbedding over sentence-transformers
---------------------------------------------
-FlagEmbedding is BAAI's own reference implementation.  It uses the exact
-inference path from training, and it's the only library that guarantees
-correct dense/sparse/colbert output formats for BGE-M3.
-
-GPU memory guide  (fp16 weights ≈ 2.2 GB on-device, max_length=512)
---------------------------------------------------------------------
-VRAM      batch_size   Notes
- 4 GB     16           Safe baseline; headroom for OOM spikes
- 8 GB     64           Good default for most consumer cards
-16 GB     128          High-throughput
-24 GB+    256          Diminishing returns above this
 """
 
 from __future__ import annotations

@@ -20,40 +20,11 @@ Design goals
 
 4.  **Separation of concerns** — prompt engineering, context formatting,
     and source extraction live in small, independently testable functions.
-
-Usage
-~~~~~
-::
-
-    from src.rag.chain import build_rag_chain, RAGResult
-    from src.vectorstore import QdrantDocStore
-
-    store    = QdrantDocStore(client, "pytorch_docs", embedder)
-    chain    = build_rag_chain(store, groq_api_key="gsk_...")
-    result   = chain.invoke("How does torch.autograd.grad differ from .backward?")
-
-    print(result.answer)
-    for src in result.sources:
-        print(f"  [{src.index}] {src.title} — {src.url}")
-
-Streaming
-~~~~~~~~~
-For token-level streaming of the answer only (sources resolved afterward)::
-
-    chain_stream = build_rag_chain(store, groq_api_key="...", streaming=True)
-    for chunk in chain_stream.stream("What is torch.compile?"):
-        print(chunk, end="", flush=True)
-
-Environment
-~~~~~~~~~~~
-Set ``GROQ_API_KEY`` in your ``.env`` (or pass it explicitly).
-Install extras::
-
-    pip install langchain-groq langchain-core
 """
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass, field
 from typing import Any
@@ -63,6 +34,8 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnableLambda, RunnablePassthrough
 from langchain_groq import ChatGroq
+
+log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Public types
@@ -274,9 +247,6 @@ def build_rag_chain(
         Sampling temperature.  0.0 gives deterministic, factual answers.
     max_tokens:
         Maximum tokens in the generated answer.
-    top_k:
-        Passed through to the retriever if it exposes a ``top_k``
-        attribute (ignored otherwise — configure the retriever directly).
     streaming:
         If ``True``, skip the ``RAGResult`` wrapper and return raw string
         tokens suitable for ``chain.stream(question)``.
@@ -296,12 +266,20 @@ def build_rag_chain(
     # ------------------------------------------------------------------
     # Step 1: retrieve documents and keep them accessible downstream
     # ------------------------------------------------------------------
-    # We need the raw Document list both for context formatting AND for
-    # source resolution after the LLM responds.  RunnablePassthrough lets
-    # us carry the docs through without duplicating the retrieval call.
 
     def retrieve_and_pack(question: str) -> dict:
+        log.info("[Chain] Step 1 — Retrieving documents | question=%r", question)
         docs = retriever.invoke(question)
+        log.info("[Chain] Step 1 — Retrieved %d documents", len(docs))
+        for i, doc in enumerate(docs, 1):
+            log.info(
+                "[Chain]   [%d] kind=%-12s  score=%.4f  symbol=%s  url=%s",
+                i,
+                doc.metadata.get("kind", "?"),
+                doc.metadata.get("score", 0.0),
+                doc.metadata.get("symbol") or "—",
+                doc.metadata.get("citation_url", ""),
+            )
         return {"question": question, "docs": docs}
 
     retrieve_step = RunnableLambda(retrieve_and_pack)
@@ -311,10 +289,15 @@ def build_rag_chain(
     # ------------------------------------------------------------------
 
     def build_prompt_input(packed: dict) -> dict:
+        context = _format_docs(packed["docs"])
+        log.info(
+            "[Chain] Step 2 — Context formatted | blocks=%d | total_chars=%d",
+            len(packed["docs"]), len(context),
+        )
         return {
-            "context": _format_docs(packed["docs"]),
+            "context": context,
             "question": packed["question"],
-            "docs": packed["docs"],  # pass through for source extraction
+            "docs": packed["docs"],
         }
 
     format_step = RunnableLambda(build_prompt_input)
@@ -326,9 +309,26 @@ def build_rag_chain(
     def pack_result(inputs: dict) -> RAGResult:
         answer: str = inputs["answer"]
         docs: list[Document] = inputs["docs"]
+        sources = _extract_sources(answer, docs)
+        log.info(
+            "[Chain] Step 3 — Answer ready | answer_chars=%d | citations_in_text=%d | unique_sources=%d",
+            len(answer),
+            len(re.findall(r"\[\d+\]", answer)),
+            len(sources),
+        )
+        log.info("[Chain] Answer preview: %r", answer[:200])
+        if sources:
+            log.info("[Chain] Sources resolved:")
+            for src in sources:
+                log.info(
+                    "[Chain]   [%d] kind=%-10s  symbol=%-40s  %s",
+                    src.index, src.kind, src.symbol or "—", src.url,
+                )
+        else:
+            log.warning("[Chain] No citation markers found in the answer")
         return RAGResult(
             answer=answer,
-            sources=_extract_sources(answer, docs),
+            sources=sources,
             context_docs=docs,
         )
 
@@ -346,8 +346,13 @@ def build_rag_chain(
 
     # Non-streaming: full RAGResult with resolved citations.
     def llm_step(inputs: dict) -> dict:
+        log.info(
+            "[Chain] LLM call | model=%s | max_tokens=%d | temperature=%s",
+            model, max_tokens, temperature,
+        )
         prompt_input = {"context": inputs["context"], "question": inputs["question"]}
         answer = (_PROMPT | llm | StrOutputParser()).invoke(prompt_input)
+        log.info("[Chain] LLM response received | chars=%d", len(answer))
         return {"answer": answer, "docs": inputs["docs"]}
 
     chain = retrieve_step | format_step | RunnableLambda(llm_step) | RunnableLambda(pack_result)

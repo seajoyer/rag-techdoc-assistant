@@ -21,6 +21,7 @@ Extra dependency:
 import logging
 import os
 import sys
+import time
 from pathlib import Path
 
 import telebot
@@ -49,16 +50,32 @@ QDRANT_KEY = os.environ["QDRANT_API_KEY"]
 GROQ_KEY   = os.environ["GROQ_API_KEY"]
 BOT_TOKEN  = os.environ["TELEGRAM_BOT_TOKEN"]
 
+# ── logging ───────────────────────────────────────────────────────────────────
+# Root logger stays at WARNING so third-party libraries stay quiet.
+# Our own pipeline namespaces are promoted to INFO so every tagged log line
+# ([HyDE], [Embed], [Sparse], [Search], [Retriever], [Chain]) is visible.
 logging.basicConfig(
     level=logging.WARNING,
-    format="%(asctime)s  %(name)-25s  %(levelname)-8s  %(message)s",
+    format="%(asctime)s  %(name)-35s  %(levelname)-8s  %(message)s",
     datefmt="%H:%M:%S",
 )
+
+_PIPELINE_LOGGERS = [
+    "src.retrieval.hyde",
+    "src.embedding.embedder",
+    "src.embedding.cache",
+    "src.vectorstore.store",
+    "src.rag.chain",
+]
+for _name in _PIPELINE_LOGGERS:
+    logging.getLogger(_name).setLevel(logging.INFO)
+
+log = logging.getLogger(__name__)
 
 # ── build the chain once at startup (notebook Sections 3-4) ──────────────────
 print("Connecting to Qdrant …")
 qdrant_client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_KEY)
-embedder      = BGEM3Embedder(batch_size=1)  # All possible combinations of devices='cpu'/'cuda', use_fp16=True/False don't affect the output
+embedder      = BGEM3Embedder(batch_size=1)
 store         = QdrantDocStore(
     client=qdrant_client,
     collection_name=COLLECTION_NAME,
@@ -102,12 +119,22 @@ def _format_retrieval(result: RAGResult) -> str:
         lines.append(f"symbol={m.get('symbol') or '—'}")
         lines.append(f"       {m.get('citation_url')}")
     return "\n".join(lines)
-    
+
 
 @bot.message_handler(func=lambda _: True)
 def handle_message(message):
-    question  = message.text.strip()
-    result    = chain.invoke(question)
+    question = message.text.strip()
+    log.warning("[Bot] Incoming question | user=%s | question=%r", message.from_user.id, question)
+
+    t0 = time.perf_counter()
+    result = chain.invoke(question)
+    elapsed = time.perf_counter() - t0
+
+    log.warning(
+        "[Bot] Pipeline complete | elapsed=%.2fs | sources=%d | answer_chars=%d",
+        elapsed, len(result.sources), len(result.answer),
+    )
+
     reply     = _format_result(result)
     retrieval = _format_retrieval(result)
 

@@ -23,29 +23,6 @@ Split strategy
     context.  Code fences (``` … ```) are treated as atomic paragraphs: they
     are never split mid-fence.
 
-Recommended defaults for ``text-embedding-3-small`` (8 191-token context)
-or ``nomic-embed-text`` (2 048-token context):
-
-    max_chars     = 1 500   ≈ 375 tokens — leaves headroom for system prompt
-    overlap_chars =  200   ≈  50 tokens — sentence-level continuity
-    min_chars     =  120          — weeds out stubs, keeps short API entries
-
-Usage
-~~~~~
-::
-
-    from src.data_acquisition.pipeline import DocPage
-    from src.chunking.chunker import ChunkSplitter, Chunk
-
-    splitter = ChunkSplitter()                       # default settings
-    chunks: list[Chunk] = splitter.split(page)       # page is a DocPage
-
-    # Access per-chunk citation URL for source attribution:
-    for chunk in chunks:
-        print(chunk.citation_url, chunk.kind, chunk.symbol)
-
-    # Serialise to JSON for vector-store upsert:
-    records = [c.to_dict() for c in chunks]
 """
 
 from __future__ import annotations
@@ -188,32 +165,6 @@ class Chunk:
     def to_dict(self) -> dict:
         """
         Return a JSON-serialisable dict for vector-store upsert.
-
-        The ``keywords`` list is a natural fit for the ``sparse_values``
-        field in Pinecone hybrid search or the ``filter`` metadata in
-        Chroma / Weaviate.
-
-        Example
-        -------
-        ::
-
-            {
-              "chunk_id":      "torch_random_fork_rng__0__a3f9c1",
-              "text":          "```python\\ntorch.random.fork_rng(…)\\n```\\n…",
-              "page_url":      "https://pytorch.org/docs/stable/random.html",
-              "citation_url":  "https://pytorch.org/docs/stable/random.html#torch.random.fork_rng",
-              "anchor":        "#torch.random.fork_rng",
-              "page_title":    "torch.random",
-              "section":       "random",
-              "kind":          "function",
-              "symbol":        "torch.random.fork_rng",
-              "keywords":      ["torch", "random", "fork_rng", "devices", "enabled", …],
-              "params":        ["devices", "enabled", "_caller", "_devices_kw", "device_type"],
-              "source_url":    "https://github.com/pytorch/pytorch/blob/v2.…",
-              "char_count":    742,
-              "is_continuation": false,
-              "sub_index":     0
-            }
         """
         return {
             "chunk_id":        self.chunk_id,

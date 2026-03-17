@@ -34,9 +34,6 @@ Hybrid search with RRF fusion
     query        → FusionQuery(fusion=Fusion.RRF)  (re-ranks with RRF)
     limit        → top_k final results
 
-Reciprocal Rank Fusion is parameter-free and robust across different
-vector score distributions, making it a safe default for hybrid retrieval.
-
 Split-channel HyDE
 ~~~~~~~~~~~~~~~~~~
 ``hybrid_search()`` accepts an optional ``dense_query`` override.  When
@@ -46,50 +43,6 @@ always uses the original query for exact keyword matching.
 
     dense leg  → embed(dense_query or query)    # HyDE snippet if available
     sparse leg → tokenize(query)                # always the original question
-
-This split-channel design maximises both legs:
-* Dense recalls semantically similar chunks even for conversational questions.
-* Sparse catches exact symbol names that appear verbatim in the question.
-
-Deduplication
-~~~~~~~~~~~~~
-``HybridQdrantRetriever._get_relevant_documents`` deduplicates results so
-that the same PyTorch symbol never occupies more than one slot in the
-returned list.  Continuation sub-chunks (sub_index > 0) that score below
-their primary chunk are dropped, keeping the context window clean.
-
-LangChain integration
-~~~~~~~~~~~~~~~~~~~~~
-``QdrantDocStore.as_retriever()`` returns a ``HybridQdrantRetriever``
-(``langchain_core.BaseRetriever`` subclass) ready to plug into any
-LangChain LCEL chain::
-
-    retriever = store.as_retriever(top_k=6)
-    chain = (
-        {"context": retriever | format_docs, "question": RunnablePassthrough()}
-        | prompt
-        | llm
-        | StrOutputParser()
-    )
-
-Each retrieved ``Document`` carries the full chunk payload in ``metadata``,
-so citation URLs, symbol names, and section info are directly available to
-the answer-formatting prompt.
-
-Filtering
-~~~~~~~~~
-Both ``hybrid_search()`` and ``as_retriever()`` accept an optional
-``filter_`` argument (a ``qdrant_client.models.Filter``) for section-
-or kind-scoped retrieval::
-
-    from qdrant_client import models
-    api_only = models.Filter(
-        must=[models.FieldCondition(
-            key="kind",
-            match=models.MatchExcept(**{"except": ["heading"]}),
-        )]
-    )
-    docs = store.hybrid_search("DataLoader", filter_=api_only)
 """
 
 from __future__ import annotations
@@ -309,21 +262,39 @@ class QdrantDocStore:
         -------
         list of (payload_dict, rrf_score) tuples, highest score first.
         """
+        hyde_active = dense_query is not None
+        embed_text  = dense_query if hyde_active else query
+
         # --- Dense query embedding ----------------------------------------
-        # Use the override (e.g. a HyDE snippet) when provided; fall back to
-        # the original query otherwise.
-        embed_text = dense_query if dense_query is not None else query
-        q_dense = self.embedder.embed([embed_text])[0].tolist()
+        log.info(
+            "[Embed] Dense query embedding | hyde=%s | text=%r",
+            hyde_active, embed_text,
+        )
+        q_dense = self.embedder.embed([embed_text])[0]
+        log.info(
+            "[Embed] Dense vector ready | dim=%d | norm=%.4f",
+            len(q_dense), float(np.linalg.norm(q_dense)),
+        )
+        q_dense = q_dense.tolist()
 
         # --- Sparse query vector ------------------------------------------
-        # tokenize_query() is the single source of truth for token
-        # normalisation; it matches the rules applied at index time by
-        # extractor._build_keywords, ensuring punctuation attached to symbols
-        # (e.g. "torch.cos?" or ".backward()") never prevents a keyword match.
         q_tokens = tokenize_query(query)
+        log.info(
+            "[Sparse] Query tokens (%d) | tokens=%s",
+            len(q_tokens), q_tokens,
+        )
         q_sparse_sv = keywords_to_sparse(q_tokens)
+        log.info(
+            "[Sparse] Sparse vector ready | nnz=%d",
+            len(q_sparse_sv.indices),
+        )
 
         candidate_limit = top_k * prefetch_multiplier
+        log.info(
+            "[Search] Querying Qdrant | collection=%r | top_k=%d | candidates=%d | filter=%s",
+            self.collection_name, top_k, candidate_limit,
+            "yes" if filter_ else "none",
+        )
 
         results = self.client.query_points(
             collection_name=self.collection_name,
@@ -349,7 +320,19 @@ class QdrantDocStore:
             with_payload=True,
         )
 
-        return [(pt.payload, pt.score) for pt in results.points]
+        hits = [(pt.payload, pt.score) for pt in results.points]
+
+        log.info("[Search] Retrieved %d chunks (after RRF fusion):", len(hits))
+        for rank, (payload, score) in enumerate(hits, 1):
+            log.info(
+                "[Search]   [%d] score=%.4f  kind=%-12s  symbol=%s  title=%r",
+                rank, score,
+                payload.get("kind", "?"),
+                payload.get("symbol") or "—",
+                (payload.get("page_title") or "")[:60],
+            )
+
+        return hits
 
     # ------------------------------------------------------------------
     # LangChain integration
@@ -409,13 +392,6 @@ class HybridQdrantRetriever(BaseRetriever):
     The ``citation_url`` and ``symbol`` fields in metadata make it easy to
     build source-attributed answers in the downstream LLM chain.
 
-    Deduplication
-    ~~~~~~~~~~~~~
-    Results are deduplicated by symbol name before being returned.  If the
-    same PyTorch symbol appears in multiple sub-chunks (continuation splits),
-    only the highest-scored chunk is kept.  Heading/prose chunks are
-    deduplicated by (page_url, section) pair.
-
     HyDE
     ~~~~
     When ``hyde`` is set, each query is first transformed into a hypothetical
@@ -435,11 +411,14 @@ class HybridQdrantRetriever(BaseRetriever):
         *,
         run_manager: CallbackManagerForRetrieverRun,
     ) -> list[Document]:
+        log.info("[Retriever] Query received | query=%r", query)
+
         # -- HyDE: generate a hypothetical snippet for the dense leg ---------
         dense_query: str | None = None
         if self.hyde is not None:
             dense_query = self.hyde.transform(query)
-            log.debug("HyDE dense_query: %r", dense_query[:80] if dense_query else None)
+        else:
+            log.info("[Retriever] HyDE disabled — using raw query for dense leg")
 
         results = self.store.hybrid_search(
             query=query,
@@ -449,22 +428,24 @@ class HybridQdrantRetriever(BaseRetriever):
         )
 
         # -- Deduplication: one chunk per symbol / prose section -------------
-        # RRF can return multiple sub-chunks of the same symbol (sub_index 0
-        # and 1 from oversized section splitting).  Keep only the best-scored
-        # chunk per identity key so the context window stays clean.
         seen: set[str] = set()
         docs: list[Document] = []
+        dropped_threshold = 0
+        dropped_dedup = 0
 
         for payload, score in results:
             if self.score_threshold is not None and score < self.score_threshold:
+                log.debug(
+                    "[Retriever] Dropped (below threshold %.4f): score=%.4f symbol=%s",
+                    self.score_threshold, score, payload.get("symbol") or "—",
+                )
+                dropped_threshold += 1
                 continue
 
             symbol = payload.get("symbol", "")
             if symbol:
-                # One entry per fully-qualified API symbol.
                 dedup_key = symbol
             else:
-                # For prose/heading chunks, deduplicate by page + section.
                 dedup_key = (
                     payload.get("page_url", "")
                     + "|"
@@ -472,6 +453,11 @@ class HybridQdrantRetriever(BaseRetriever):
                 )
 
             if dedup_key in seen:
+                log.debug(
+                    "[Retriever] Dropped (duplicate key %r): score=%.4f",
+                    dedup_key, score,
+                )
+                dropped_dedup += 1
                 continue
             seen.add(dedup_key)
 
@@ -479,6 +465,20 @@ class HybridQdrantRetriever(BaseRetriever):
             meta = {k: v for k, v in payload.items() if k != "text"}
             meta["score"] = score
             docs.append(Document(page_content=text, metadata=meta))
+
+        log.info(
+            "[Retriever] Returning %d docs | dropped_threshold=%d dropped_dedup=%d",
+            len(docs), dropped_threshold, dropped_dedup,
+        )
+        for i, doc in enumerate(docs, 1):
+            log.info(
+                "[Retriever]   [%d] score=%.4f  kind=%-12s  symbol=%s  chars=%d",
+                i,
+                doc.metadata.get("score", 0.0),
+                doc.metadata.get("kind", "?"),
+                doc.metadata.get("symbol") or "—",
+                len(doc.page_content),
+            )
 
         return docs
 
