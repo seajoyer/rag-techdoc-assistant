@@ -1,0 +1,72 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# docker-compose.yml  —  PyTorch Docs RAG Bot
+#
+# Usage
+# ─────
+# Local dev (HF Inference embedder):
+#   docker compose up --build
+#
+# GPU server (local embedder — requires nvidia-container-toolkit):
+#   docker compose --profile gpu up --build
+#
+# Run in background:
+#   docker compose up -d --build
+#
+# Env vars are loaded from .env (copy from .env.example and fill in values).
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  # ── Default: CPU / HF Inference embedder ─────────────────────────────────
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: pytorch-rag-bot
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # Override in .env to "local" when running the GPU variant
+      EMBEDDER_MODE: ${EMBEDDER_MODE:-hf}
+    volumes:
+      # Persist HuggingFace model cache across rebuilds
+      - hf_cache:/root/.cache/huggingface
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"
+    # No ports exposed — bot uses long-polling, no inbound traffic needed.
+
+  # ── GPU variant: local BGEM3Embedder ─────────────────────────────────────
+  # Activate with:  docker compose --profile gpu up --build
+  bot-gpu:
+    profiles: [gpu]
+    build:
+      context: .
+      dockerfile: Dockerfile
+      # The Dockerfile contains a commented GPU variant — uncomment it or
+      # point to a separate Dockerfile.gpu for full GPU support.
+    container_name: pytorch-rag-bot-gpu
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      EMBEDDER_MODE: local
+    volumes:
+      - hf_cache:/root/.cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+volumes:
+  hf_cache:
+    driver: local
