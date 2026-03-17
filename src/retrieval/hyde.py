@@ -141,6 +141,7 @@ class HyDETransformer:
                 model=self.model,
                 max_tokens=self.max_tokens,
                 temperature=0.0,
+                seed=42,
                 messages=[
                     {"role": "system", "content": _SYSTEM_PROMPT},
                     {"role": "user", "content": _USER_TEMPLATE.format(question=query)},
