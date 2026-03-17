@@ -58,7 +58,7 @@ logging.basicConfig(
 # ── build the chain once at startup (notebook Sections 3-4) ──────────────────
 print("Connecting to Qdrant …")
 qdrant_client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_KEY)
-embedder      = BGEM3Embedder(batch_size=1)
+embedder      = BGEM3Embedder(batch_size=1)  # All possible combinations of devices='cpu'/'cuda', use_fp16=True/False don't affect the output
 store         = QdrantDocStore(
     client=qdrant_client,
     collection_name=COLLECTION_NAME,
