@@ -15,6 +15,8 @@ Flow
    source keyboard.
 6. Handle errors gracefully: edit the status message with a user-
    friendly error rather than leaving a "searching…" ghost message.
+7. Forward the query to the logging group (if LOG_GROUP_ID is set),
+   best-effort, after the reply has been delivered.
 """
 
 from __future__ import annotations
@@ -30,6 +32,7 @@ from aiogram.types import Message
 from bot import services
 from bot.config import settings
 from bot.keyboards import format_error, format_rag_response, sources_keyboard
+from bot.query_log import log_query
 
 log = logging.getLogger(__name__)
 
@@ -131,6 +134,15 @@ async def handle_question(message: Message, bot: Bot) -> None:
     finally:
         stop_typing.set()
         typing_task.cancel()
+
+    # ── Forward query to logging group (best-effort, after reply) ─────────
+    if settings.log_group_id is not None:
+        await log_query(
+            bot=bot,
+            user=message.from_user,
+            query=question,
+            log_group_id=settings.log_group_id,
+        )
 
 
 # ---------------------------------------------------------------------------

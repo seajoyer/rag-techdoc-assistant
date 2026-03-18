@@ -54,6 +54,11 @@ class Settings(BaseSettings):
     rate_limit_window: int = Field(60, validation_alias="RATE_LIMIT_WINDOW")
     rate_limit_max: int    = Field(5,  validation_alias="RATE_LIMIT_MAX")
 
+    # ── Query logging ─────────────────────────────────────────────────────
+    # Telegram chat ID of the private group where queries are forwarded.
+    # Leave empty (or unset) to disable query logging.
+    log_group_id: int | None = Field(None, validation_alias="LOG_GROUP_ID")
+
     # ── Misc ──────────────────────────────────────────────────────────────
     # Telegram user IDs allowed to use the bot.
     # Empty list = no restriction (public bot).

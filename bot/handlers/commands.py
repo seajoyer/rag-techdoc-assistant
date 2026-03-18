@@ -21,19 +21,17 @@ router = Router(name="commands")
 # ---------------------------------------------------------------------------
 
 _WELCOME = """\
-👋 <b>Welcome to the PyTorch Docs Assistant!</b>
+👋 <b>PyTorch Docs Assistant</b>
 
-I can answer questions about the PyTorch API using the official \
-documentation.  Every factual claim in my answers is cited with a \
-clickable source link.
+Ask me anything about PyTorch and I'll answer \
+using the official documentation with inline citations.
 
 <b>Examples:</b>
-• <i>How does torch.autograd.grad differ from .backward()?</i>
-• <i>What parameters does torch.nn.MultiheadAttention accept?</i>
-• <i>How do I use torch.utils.checkpoint to save memory?</i>
+• <code>How do I move a tensor to GPU?</code>
+• <code>What is the difference between torch.Tensor and torch.tensor?</code>
+• <code>How does torch.autograd.grad differ from calling .backward()?</code>
 
-Just send me your question as a plain message. \
-Type /help to see this message again, or /status to check the pipeline.
+Just type your question and I'll get back to you. 🔍 \
 """
 
 
@@ -66,7 +64,6 @@ relevant documentation chunks and synthesise a cited answer.
 <b>Limitations:</b>
 • I answer only based on the indexed PyTorch documentation.
 • I will tell you if the context does not contain enough information.
-• Rate limit: {max_req} requests per {window}s per user.
 """
 
 
