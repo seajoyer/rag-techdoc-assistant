@@ -18,7 +18,7 @@ Embedder modes
 
 from __future__ import annotations
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -60,6 +60,13 @@ class Settings(BaseSettings):
     allowed_user_ids: list[int] = Field(
         default_factory=list, validation_alias="ALLOWED_USER_IDS"
     )
+
+    @field_validator("allowed_user_ids", mode="before")
+    @classmethod
+    def _parse_user_ids(cls, v: object) -> object:
+        if isinstance(v, str):
+            return [int(x.strip()) for x in v.split(",") if x.strip()]
+        return v
 
     @property
     def is_public(self) -> bool:
