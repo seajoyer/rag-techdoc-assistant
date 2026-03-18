@@ -51,7 +51,7 @@ from aiogram.types import Message
 
 from bot import services
 from bot.config import settings
-from bot.keyboards import format_error, format_rag_response, sources_keyboard
+from bot.keyboards import format_error, format_rag_response, renumber_result, sources_keyboard
 from bot.query_log import log_query
 
 log = logging.getLogger(__name__)
@@ -103,6 +103,10 @@ async def _standard_answer(
         None,
         functools.partial(chain.invoke, question),
     )
+
+    # Renumber citations to a clean consecutive 1-based sequence before
+    # rendering — both the answer text and the keyboard use the same result.
+    result = renumber_result(result)
 
     log.info(
         "[Handler] Standard answer ready | answer_chars=%d | sources=%d",
@@ -195,6 +199,9 @@ async def _stream_answer(
             "Streaming ended without producing a RAGResult — "
             "check stream_rag() for early exit."
         )
+
+    # Renumber citations before rendering (same as standard path).
+    final_result = renumber_result(final_result)
 
     log.info(
         "[Handler] Streaming complete | answer_chars=%d | sources=%d",

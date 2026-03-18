@@ -13,9 +13,18 @@ The LLM returns plain text with ``[N]`` markers, e.g.::
 ``format_rag_response()`` converts this into Telegram HTML:
 
   1. HTML-escapes the whole answer (protects against < / > / &).
-  2. Replaces each ``[N]`` with a clickable ``<a href="url">[N]</a>`` link.
-  3. Appends a *Sources* footer with titled links.
+  2. Replaces each ``[N]`` with a clickable ``<a href="url">[N]</a>`` link,
+     inserting a ``·`` separator between adjacent citation links so that
+     ``[2][3]`` renders as ``²·³`` rather than the visually ambiguous ``²³``.
+  3. Appends a *Sources* footer with ``[N] title`` links.
   4. Wraps any inline code (``...``) and fenced blocks in <code>/<pre>.
+
+Renumbering
+~~~~~~~~~~~
+``renumber_result()`` remaps the citation indices produced by the RAG chain
+(which may be non-consecutive, e.g. [2][3][4] when [1] was deduped) to a
+clean 1-based sequence ([1][2][3]).  Call it once in the handler before
+passing the result to both ``format_rag_response`` and ``sources_keyboard``.
 
 Inline keyboard
 ~~~~~~~~~~~~~~~
@@ -43,6 +52,65 @@ _MAX_ANSWER_CHARS = 3_500
 _SUPERSCRIPTS = {1: "¹", 2: "²", 3: "³", 4: "⁴", 5: "⁵",
                  6: "⁶", 7: "⁷", 8: "⁸", 9: "⁹"}
 
+# _SUPERSCRIPTS = {1: "⁽¹⁾", 2: "⁽²⁾", 3: "⁽³⁾", 4: "⁽⁴⁾", 5: "⁽⁵⁾",
+#                  6: "⁽⁶⁾", 7: "⁽⁷⁾", 8: "⁽⁸⁾", 9: "⁽⁹⁾"}
+
+# Separator inserted between adjacent citation links so "²³" becomes "², ³".
+_CITATION_SEP = " "
+
+
+# ---------------------------------------------------------------------------
+# Renumbering helper
+# ---------------------------------------------------------------------------
+
+def renumber_result(result: RAGResult) -> RAGResult:
+    """
+    Remap citation indices to a clean 1-based consecutive sequence.
+
+    The RAG chain numbers citations by their position in the *retrieved*
+    document list, which can be sparse after deduplication (e.g. [2][3][5]).
+    This function rewrites both the answer text and the sources list so
+    that citations always read [1], [2], [3]… in order of first appearance.
+
+    Parameters
+    ----------
+    result:
+        The ``RAGResult`` returned by the chain.
+
+    Returns
+    -------
+    RAGResult
+        A new ``RAGResult`` with renumbered answer and sources.
+        The original is left untouched.
+    """
+    if not result.sources:
+        return result
+
+    # sources are already ordered by first appearance in the answer
+    old_to_new: dict[int, int] = {
+        src.index: new_idx
+        for new_idx, src in enumerate(result.sources, start=1)
+    }
+
+    def _renumber(m: re.Match) -> str:
+        n = int(m.group(1))
+        return f"[{old_to_new.get(n, n)}]"
+
+    new_answer = re.sub(r"\[(\d+)\]", _renumber, result.answer)
+
+    new_sources = [
+        SourceRef(
+            index=old_to_new[src.index],
+            url=src.url,
+            title=src.title,
+            symbol=src.symbol,
+            kind=src.kind,
+        )
+        for src in result.sources
+    ]
+
+    return RAGResult(answer=new_answer, sources=new_sources, context_docs=result.context_docs)
+
 
 # ---------------------------------------------------------------------------
 # Keyboard builder
@@ -61,7 +129,6 @@ def sources_keyboard(sources: list[SourceRef]) -> InlineKeyboardMarkup | None:
     buttons: list[list[InlineKeyboardButton]] = []
     for src in sources:
         label = src.symbol or src.title or f"Source {src.index}"
-        # Telegram button text: 64-char limit, prefix with index
         btn_text = f"[{src.index}] {label}"
         if len(btn_text) > 60:
             btn_text = btn_text[:57] + "…"
@@ -81,7 +148,8 @@ def format_rag_response(result: RAGResult) -> str:
     Parameters
     ----------
     result:
-        The chain output to render.
+        The chain output to render.  Pass the output of ``renumber_result()``
+        for clean consecutive citation numbers.
 
     Returns
     -------
@@ -100,6 +168,7 @@ def format_rag_response(result: RAGResult) -> str:
 
     # ── Inject clickable citation links ───────────────────────────────
     url_map: dict[int, str] = {src.index: src.url for src in result.sources}
+
     def _replace_citation(m: re.Match) -> str:
         n = int(m.group(1))
         url = url_map.get(n)
@@ -111,13 +180,17 @@ def format_rag_response(result: RAGResult) -> str:
     # Match [N] that were NOT already wrapped in an <a> tag by _md_to_html
     answer = re.sub(r"\[(\d+)\]", _replace_citation, answer)
 
+    # ── Separate consecutive citation links ────────────────────────────
+    # Without this, adjacent anchors like ²³ are visually indistinguishable
+    # from the number 23.  Insert a thin separator between them.
+    answer = re.sub(r"(</a>)(<a href=)", rf"\1{_CITATION_SEP}\2", answer)
+
     # ── Sources footer ─────────────────────────────────────────────────
     if result.sources:
         footer_lines = ["\n\n📚 <b>Sources</b>"]
         for src in result.sources:
             label = html.escape(src.symbol or src.title or src.url)
-            sup   = _SUPERSCRIPTS.get(src.index, f"[{src.index}]")
-            footer_lines.append(f'{sup} <a href="{src.url}">{label}</a>')
+            footer_lines.append(f'[{src.index}] <a href="{src.url}">{label}</a>')
         answer += "\n".join(footer_lines)
 
     return answer
