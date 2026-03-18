@@ -3,31 +3,41 @@ name = "rag-technical-docs"
 version = "0.1.0"
 description = ""
 readme = "README.md"
-requires-python = ">=3.12,<3.13"
+requires-python = ">=3.12"
 dependencies = [
     "beautifulsoup4>=4.14.3",
-    "dotenv>=0.9.9",
-    "flagembedding>=1.3.5",
-    "ipywidgets>=8.1.8",
-    "jupyterlab>=4.5.3",
-    "jupyterlab-vim>=4.1.4",
-    "langchain>=1.2.12",
-    "langchain-core>=1.2.19",
-    "langchain-groq>=1.1.2",
+    "python-dotenv>=1.0",
+    "groq>=0.9.0",
+    "langchain>=0.3.0",
+    "langchain-core>=0.3.0",
+    "langchain-groq>=0.2.0",
     "lxml>=6.0.2",
     "markdown>=3.10.2",
     "markdownify>=1.2.2",
-    "matplotlib>=3.10.8",
     "numpy>=2.4.2",
     "pandas>=3.0.0",
-    "pytelegrambotapi>=4.32.0",
     "qdrant-client>=1.17.1",
     "requests>=2.32.5",
-    "scikit-learn>=1.8.0",
-    "seaborn>=0.13.2",
-    "torch>=2.10.0",
     "tqdm>=4.67.3",
+]
+
+[project.optional-dependencies]
+bot = [
+    "aiogram>=3.26.0",
+]
+
+local-embedding = [
+    "flagembedding>=1.3.5",
+    "torch>=2.10.0",
     "transformers<5.0",
+]
+
+research = [
+    "jupyterlab>=4.5.3",
+    "jupyterlab-vim>=4.1.4",
+    "ipywidgets>=8.1.8",
+    "seaborn>=0.13.2",
+    "matplotlib>=3.10.8",
 ]
 
 [dependency-groups]
@@ -42,15 +52,9 @@ line-length = 120
 
 exclude = [
     "data/",
-    "models/",
 ]
 
 lint.select = ["E", "F", "I", "B", "UP", "RUF"]
 
 [tool.ty.src]
 include = ["src", "notebooks"]
-
-# [[tool.uv.index]]
-# name = "pytorch-cu128"
-# url = "https://download.pytorch.org/whl/cu126"
-# explicit = true
