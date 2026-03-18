@@ -22,14 +22,25 @@ Embedder selection (EMBEDDER_MODE)
 
 The chain is built in a thread-pool executor so the asyncio event loop
 stays responsive while the heavy model loads.
+
+Streaming support
+~~~~~~~~~~~~~~~~~
+``astream_answer(question)`` is an async generator that yields raw ``str``
+token chunks followed by a single ``RAGResult`` as the last item.  It
+bridges the blocking ``stream_rag`` generator (which runs in a thread-pool
+executor) to the asyncio event loop via an ``asyncio.Queue``.
+
+The retriever instance and LLM parameters are cached alongside the chain
+after the first build so ``astream_answer`` can reuse them without any
+additional initialisation cost.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-import sys
-from typing import Any
+import threading
+from typing import Any, AsyncGenerator
 
 log = logging.getLogger(__name__)
 
@@ -37,6 +48,10 @@ log = logging.getLogger(__name__)
 _chain: Any | None = None
 _chain_lock: asyncio.Lock | None = None   # created lazily (needs running loop)
 _embedder_label: str = "unknown"          # human-readable; shown in /status
+
+# Cached for streaming path — set inside _build_chain (same executor call).
+_retriever: Any | None = None
+_rag_params: dict | None = None           # groq_api_key, model, temperature, max_tokens
 
 
 def _get_lock() -> asyncio.Lock:
@@ -80,15 +95,85 @@ def embedder_label() -> str:
     return _embedder_label
 
 
+async def astream_answer(
+    question: str,
+) -> AsyncGenerator[Any, None]:
+    """
+    Async generator: yields raw LLM token ``str`` chunks, then a ``RAGResult``.
+
+    The last item is always a ``RAGResult``; callers detect it with
+    ``isinstance(item, RAGResult)``.
+
+    This function bridges the blocking ``stream_rag`` generator to the
+    asyncio event loop:
+
+    1. Ensures the pipeline is initialised (no-op after the first call).
+    2. Spawns a daemon thread that runs ``stream_rag`` and enqueues each
+       yielded value via ``asyncio.run_coroutine_threadsafe``.
+    3. The async generator drains the queue, re-raising any exception that
+       propagated from the thread.
+
+    The queue has a bounded size (``_STREAM_QUEUE_MAXSIZE``) to provide
+    back-pressure: the producer thread blocks once the consumer falls
+    behind, preventing unbounded memory growth for slow Telegram connections.
+    """
+    from src.rag.chain import stream_rag
+
+    # Ensure the pipeline (and therefore _retriever / _rag_params) is ready.
+    await get_chain()
+
+    if _retriever is None or _rag_params is None:
+        raise RuntimeError(
+            "Retriever not initialised after get_chain() — this should not happen."
+        )
+
+    _STREAM_QUEUE_MAXSIZE = 128
+    sentinel = object()
+    queue: asyncio.Queue = asyncio.Queue(maxsize=_STREAM_QUEUE_MAXSIZE)
+    loop = asyncio.get_running_loop()
+
+    def _run_stream() -> None:
+        """Blocking worker: runs in the thread pool."""
+        try:
+            for item in stream_rag(question, _retriever, **_rag_params):
+                # run_coroutine_threadsafe + .result() gives us back-pressure:
+                # this blocks the producer thread until the queue has space.
+                future = asyncio.run_coroutine_threadsafe(queue.put(item), loop)
+                future.result()          # propagate CancelledError / timeout
+        except Exception as exc:
+            asyncio.run_coroutine_threadsafe(queue.put(exc), loop).result()
+        finally:
+            asyncio.run_coroutine_threadsafe(queue.put(sentinel), loop).result()
+
+    thread = threading.Thread(target=_run_stream, daemon=True, name="rag-stream")
+    thread.start()
+
+    while True:
+        item = await queue.get()
+        if item is sentinel:
+            break
+        if isinstance(item, Exception):
+            raise item
+        yield item
+
+
 # ── Internal builder (runs in a thread pool) ──────────────────────────────
 
 def _build_chain() -> Any:
     """
     Construct and return the full RAG chain.
 
+    Side-effects
+    ~~~~~~~~~~~~
+    Sets the module-level ``_retriever``, ``_rag_params``, and
+    ``_embedder_label`` globals so that ``astream_answer`` can reuse the
+    already-constructed retriever without rebuilding the pipeline.
+
     This function is *blocking* and should only be called via
     ``run_in_executor``.
     """
+    global _retriever, _rag_params
+
     from bot.config import settings
     from qdrant_client import QdrantClient
     from src.vectorstore import QdrantDocStore
@@ -115,6 +200,17 @@ def _build_chain() -> Any:
             log.warning("[Service] HyDE init failed (%s) — disabled.", exc)
 
     retriever = store.as_retriever(top_k=settings.top_k, hyde=hyde)
+
+    # ── Cache components needed by astream_answer ─────────────────────────
+    _retriever = retriever
+    _rag_params = {
+        "groq_api_key": settings.groq_api_key,
+        "temperature":  settings.temperature,
+        "max_tokens":   settings.max_tokens,
+        # model is intentionally omitted so stream_rag uses its own default,
+        # but we pass it explicitly here for consistency.
+        "model": "llama-3.3-70b-versatile",
+    }
 
     chain = build_rag_chain(
         retriever=retriever,

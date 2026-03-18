@@ -20,6 +20,13 @@ Design goals
 
 4.  **Separation of concerns** — prompt engineering, context formatting,
     and source extraction live in small, independently testable functions.
+
+5.  **Streaming** — ``stream_rag()`` is a plain synchronous generator
+    intended for thread-pool execution.  It yields raw ``str`` token
+    chunks while the LLM generates, then yields a single ``RAGResult``
+    as the final item.  This lets the caller (e.g. the Telegram bot
+    handler) stream live previews via ``sendMessageDraft`` while still
+    producing the full citation-resolved result at the end.
 """
 
 from __future__ import annotations
@@ -27,7 +34,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Generator
 
 from langchain_core.documents import Document
 from langchain_core.output_parsers import StrOutputParser
@@ -213,7 +220,7 @@ def _extract_sources(
 
 
 # ---------------------------------------------------------------------------
-# Chain builder
+# Chain builder  (non-streaming — returns RAGResult)
 # ---------------------------------------------------------------------------
 
 
@@ -357,6 +364,128 @@ def build_rag_chain(
 
     chain = retrieve_step | format_step | RunnableLambda(llm_step) | RunnableLambda(pack_result)
     return chain
+
+
+# ---------------------------------------------------------------------------
+# Streaming generator  (yields tokens → RAGResult, runs in a thread pool)
+# ---------------------------------------------------------------------------
+
+
+def stream_rag(
+    question: str,
+    retriever: Any,
+    *,
+    groq_api_key: str | None = None,
+    model: str = "llama-3.3-70b-versatile",
+    temperature: float = 0.0,
+    max_tokens: int = 1024,
+) -> Generator[str | RAGResult, None, None]:
+    """
+    Synchronous generator: yields raw LLM token chunks, then a ``RAGResult``.
+
+    Design
+    ~~~~~~
+    The generator is split into three stages that mirror ``build_rag_chain``
+    but expose each token as it arrives from the LLM:
+
+    1. **Retrieve** — calls the retriever synchronously (same as non-streaming).
+    2. **Stream** — yields ``str`` chunks as the LLM generates.  Each chunk
+       is a partial token or a small group of tokens depending on the model.
+    3. **Finalise** — once the LLM stream ends, resolves citation markers and
+       yields a single ``RAGResult`` as the very last item.
+
+    The caller distinguishes token chunks from the final result with
+    ``isinstance(item, RAGResult)``.
+
+    Threading
+    ~~~~~~~~~
+    This is a *blocking* generator and must be run in a thread-pool executor
+    (never on the asyncio event loop directly).  ``bot/services.py`` wraps it
+    in an async generator via an ``asyncio.Queue`` bridge so that the aiogram
+    handler can ``async for`` over it without blocking the event loop.
+
+    Parameters
+    ----------
+    question:
+        Natural-language user query.
+    retriever:
+        Any LangChain ``BaseRetriever`` — the same instance used by the
+        non-streaming chain.
+    groq_api_key:
+        Groq API key.  Falls back to the ``GROQ_API_KEY`` env var.
+    model:
+        Groq model identifier.
+    temperature:
+        Sampling temperature.
+    max_tokens:
+        Maximum tokens in the generated answer.
+
+    Yields
+    ------
+    str
+        Raw token chunks from the LLM (zero or more).
+    RAGResult
+        A single, fully-resolved result object as the last yielded value.
+        ``answer`` contains the complete concatenated text; ``sources`` are
+        resolved from the ``[N]`` markers present in that text.
+    """
+    llm = ChatGroq(
+        model=model,
+        api_key=groq_api_key,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        streaming=True,
+    )
+
+    # ── Stage 1: retrieval ────────────────────────────────────────────────
+    log.info("[Stream] Stage 1 — Retrieving documents | question=%r", question)
+    docs: list[Document] = retriever.invoke(question)
+    log.info("[Stream] Stage 1 — Retrieved %d documents", len(docs))
+    for i, doc in enumerate(docs, 1):
+        log.info(
+            "[Stream]   [%d] kind=%-12s  score=%.4f  symbol=%s  url=%s",
+            i,
+            doc.metadata.get("kind", "?"),
+            doc.metadata.get("score", 0.0),
+            doc.metadata.get("symbol") or "—",
+            doc.metadata.get("citation_url", ""),
+        )
+
+    # ── Stage 2: stream LLM tokens ───────────────────────────────────────
+    context = _format_docs(docs)
+    log.info(
+        "[Stream] Stage 2 — Streaming LLM | blocks=%d | context_chars=%d",
+        len(docs), len(context),
+    )
+
+    full_answer: str = ""
+    stream_chain = _PROMPT | llm | StrOutputParser()
+
+    for chunk in stream_chain.stream({"context": context, "question": question}):
+        full_answer += chunk
+        yield chunk  # hand raw token to the caller immediately
+
+    log.info(
+        "[Stream] Stage 2 — LLM stream complete | answer_chars=%d", len(full_answer)
+    )
+
+    # ── Stage 3: build and yield the final RAGResult ──────────────────────
+    sources = _extract_sources(full_answer, docs)
+    log.info(
+        "[Stream] Stage 3 — Resolved %d source(s) from %d [N] marker(s)",
+        len(sources),
+        len(re.findall(r"\[\d+\]", full_answer)),
+    )
+    if sources:
+        for src in sources:
+            log.info(
+                "[Stream]   [%d] kind=%-10s  symbol=%-40s  %s",
+                src.index, src.kind, src.symbol or "—", src.url,
+            )
+    else:
+        log.warning("[Stream] No citation markers found in the streamed answer")
+
+    yield RAGResult(answer=full_answer, sources=sources, context_docs=docs)
 
 
 # ---------------------------------------------------------------------------

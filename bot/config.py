@@ -14,6 +14,16 @@ Embedder modes
                                  Requires HUGGINGFACEHUB_API_TOKEN.
     auto    → Try local first; fall back to HF if torch/FlagEmbedding
               is unavailable or CUDA isn't present.  (default)
+
+Streaming mode
+~~~~~~~~~~~~~~
+``STREAMING_ENABLED`` enables token-by-token answer previews via the
+Telegram Bot API ``sendMessageDraft`` method (Bot API 9.5+).  Only works
+in private chats; group chats fall back to the standard path automatically.
+
+When enabled the bot sends live draft updates while the LLM generates the
+answer, then edits the final message with full citation formatting once
+generation is complete.  Requires aiogram with ``SendMessageDraft`` support.
 """
 
 from __future__ import annotations
@@ -45,10 +55,19 @@ class Settings(BaseSettings):
     hf_api_token: str = Field("", validation_alias="HUGGINGFACEHUB_API_TOKEN")
 
     # ── RAG pipeline ──────────────────────────────────────────────────────
-    top_k: int   = Field(6,     validation_alias="TOP_K")
-    max_tokens: int   = Field(1024,  validation_alias="MAX_TOKENS")
+    top_k: int    = Field(6,     validation_alias="TOP_K")
+    max_tokens: int    = Field(1024,  validation_alias="MAX_TOKENS")
     temperature: float = Field(0.0,   validation_alias="TEMPERATURE")
     hyde_enabled: bool  = Field(True,  validation_alias="HYDE_ENABLED")
+
+    # ── Streaming (Telegram Bot API 9.5+ sendMessageDraft) ────────────────
+    # When True the bot streams token-by-token previews in private chats.
+    # Falls back to the standard path automatically for group chats or when
+    # the aiogram SendMessageDraft method is unavailable.
+    streaming_enabled: bool = Field(False, validation_alias="STREAMING_ENABLED")
+    # Minimum seconds between successive sendMessageDraft calls.
+    # Lower values feel more responsive but burn more API quota.
+    streaming_draft_interval: float = Field(0.5, validation_alias="STREAMING_DRAFT_INTERVAL")
 
     # ── Rate limiting (per user) ───────────────────────────────────────────
     rate_limit_window: int = Field(60, validation_alias="RATE_LIMIT_WINDOW")

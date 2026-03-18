@@ -49,10 +49,10 @@ async def log_query(bot: Bot, user: User, query: str, log_group_id: int) -> None
     full_name = " ".join(name_parts)
 
     if user.username:
-        user_line = f"{full_name} (@{user.username})  |  id: <code>{user.id}</code>"
+        user_line = f"{full_name} (@{user.username})  |  id: {user.id}"
         user_link = f"https://t.me/{user.username}"
     else:
-        user_line = f"{full_name}  |  id: <code>{user.id}</code>"
+        user_line = f"{full_name}  |  id: {user.id}"
         user_link = f"tg://user?id={user.id}"
 
     text = (
