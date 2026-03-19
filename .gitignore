@@ -17,5 +17,3 @@ __pycache__/
 .ruff_cache
 
 .direnv/
-
-.pre-commit-config.yaml

@@ -43,6 +43,25 @@ always uses the original query for exact keyword matching.
 
     dense leg  → embed(dense_query or query)    # HyDE snippet if available
     sparse leg → tokenize(query)                # always the original question
+
+Cross-encoder reranking
+~~~~~~~~~~~~~~~~~~~~~~~
+When a ``CrossEncoderReranker`` is attached to ``HybridQdrantRetriever``,
+the pipeline gains a third stage:
+
+1.  ``hybrid_search`` is called with ``top_k * reranker.top_k_multiplier``
+    candidates (e.g. 24 for top_k=6, multiplier=4) so the reranker has a
+    richer pool to choose from.
+2.  The cross-encoder scores every (query, passage) pair and re-orders the
+    shortlist.  The bi-encoder RRF score is replaced by the cross-encoder
+    score in the returned tuples.
+3.  The retriever slices ``top_k`` results from the reranked list and
+    continues to the existing deduplication step unchanged.
+
+The reranker is fully optional: when absent the retriever behaves exactly
+as before.  When the ``sentence_transformers`` package is not installed the
+reranker falls back to a no-op that preserves RRF ordering, so the
+Dockerfile never needs to change.
 """
 
 from __future__ import annotations
@@ -71,11 +90,13 @@ try:
     from ..embedding.embedder import BGEM3Embedder
     from ..embedding.sparse import keywords_to_sparse, tokenize_query
     from ..retrieval.hyde import HyDETransformer
+    from ..retrieval.reranker import CrossEncoderReranker
 except ImportError:
     from chunking.chunker import Chunk  # type: ignore[no-redef]
     from embedding.embedder import BGEM3Embedder  # type: ignore[no-redef]
     from embedding.sparse import keywords_to_sparse, tokenize_query  # type: ignore[no-redef]
     from retrieval.hyde import HyDETransformer  # type: ignore[no-redef]
+    from retrieval.reranker import CrossEncoderReranker  # type: ignore[no-redef]
 
 log = logging.getLogger(__name__)
 
@@ -344,6 +365,7 @@ class QdrantDocStore:
         filter_: models.Filter | None = None,
         score_threshold: float | None = None,
         hyde: "HyDETransformer | None" = None,
+        reranker: "CrossEncoderReranker | None" = None,
     ) -> "HybridQdrantRetriever":
         """
         Return a LangChain ``BaseRetriever`` backed by this store.
@@ -355,12 +377,20 @@ class QdrantDocStore:
         filter_:
             Optional Qdrant payload filter (section, kind, symbol, etc.).
         score_threshold:
-            Drop results with RRF score below this value.  None = keep all.
+            Drop results with score below this value after reranking (or
+            after RRF when no reranker is attached).  None = keep all.
         hyde:
             Optional ``HyDETransformer`` instance.  When set, the retriever
             generates a hypothetical documentation snippet before each search
             and uses it for the dense embedding leg, improving recall for
             natural-language questions.
+        reranker:
+            Optional ``CrossEncoderReranker`` instance.  When set, the
+            retriever fetches ``top_k * reranker.top_k_multiplier``
+            candidates from Qdrant and re-orders them with the cross-encoder
+            before returning the final ``top_k`` documents.  This adds a
+            small latency overhead (~50–200 ms on CPU for 24 candidates) but
+            significantly improves context precision and recall.
 
         Returns
         -------
@@ -373,6 +403,7 @@ class QdrantDocStore:
             filter_=filter_,
             score_threshold=score_threshold,
             hyde=hyde,
+            reranker=reranker,
         )
 
 
@@ -397,10 +428,26 @@ class HybridQdrantRetriever(BaseRetriever):
     When ``hyde`` is set, each query is first transformed into a hypothetical
     documentation snippet (via a fast LLM call to Groq).  That snippet is
     embedded for the dense leg; the original query is used for sparse search.
+
+    Cross-encoder reranking
+    ~~~~~~~~~~~~~~~~~~~~~~~
+    When ``reranker`` is set:
+
+    1.  The bi-encoder retrieves ``top_k * reranker.top_k_multiplier``
+        candidates from Qdrant (a wider pool than the final ``top_k``).
+    2.  The cross-encoder scores every (query, passage) pair and re-orders
+        the shortlist by relevance.
+    3.  The retriever slices the top ``top_k`` documents and passes them to
+        the existing deduplication step.
+
+    The score stored in ``doc.metadata["score"]`` reflects the cross-encoder
+    logit when reranking is active, and the RRF score otherwise, so logging
+    and ``score_threshold`` filtering remain consistent across both modes.
     """
     top_k: int = 6
     store: QdrantDocStore = Field(repr=False)
     hyde: HyDETransformer | None = Field(default=None, repr=False)
+    reranker: CrossEncoderReranker | None = Field(default=None, repr=False)
     filter_: models.Filter | None = Field(default=None, repr=False)
     score_threshold: float | None = None
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -420,12 +467,36 @@ class HybridQdrantRetriever(BaseRetriever):
         else:
             log.info("[Retriever] HyDE disabled — using raw query for dense leg")
 
+        # -- Determine candidate pool size -----------------------------------
+        # When a reranker is attached, fetch a wider pool so the cross-encoder
+        # has richer material to work with.  Without a reranker the pool size
+        # stays at the standard top_k (hybrid_search applies its own internal
+        # prefetch_multiplier for the RRF fusion step).
+        candidate_k = (
+            self.top_k * self.reranker.top_k_multiplier
+            if self.reranker is not None and self.reranker.available
+            else self.top_k
+        )
+
+        log.info(
+            "[Retriever] Fetching %d candidate(s) | reranker=%s",
+            candidate_k,
+            "enabled" if (self.reranker is not None and self.reranker.available) else "disabled",
+        )
+
         results = self.store.hybrid_search(
             query=query,
-            top_k=self.top_k,
+            top_k=candidate_k,
             filter_=self.filter_,
             dense_query=dense_query,
         )
+
+        # -- Cross-encoder reranking ----------------------------------------
+        if self.reranker is not None and self.reranker.available:
+            results = self.reranker.rerank(query, results)
+            # Slice to the requested top_k *before* dedup so that we always
+            # return at most top_k results even when dedup removes entries.
+            results = results[: self.top_k]
 
         # -- Deduplication: one chunk per symbol / prose section -------------
         seen: set[str] = set()

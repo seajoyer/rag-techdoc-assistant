@@ -1,6 +1,8 @@
 from .sparse import keywords_to_sparse, tokenize_query, SparseVector
 from .cache import VectorCache
 from .hf_embedder import HFInferenceEmbedder
+from .lc_adapter import ProjectEmbeddings
+
 
 def __getattr__(name: str):
     if name == "BGEM3Embedder":
@@ -8,9 +10,11 @@ def __getattr__(name: str):
         return BGEM3Embedder
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
+
 __all__ = [
     "BGEM3Embedder",
     "HFInferenceEmbedder",
+    "ProjectEmbeddings",
     "keywords_to_sparse",
     "tokenize_query",
     "SparseVector",

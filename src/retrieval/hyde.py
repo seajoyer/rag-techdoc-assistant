@@ -28,16 +28,25 @@ import os
 log = logging.getLogger(__name__)
 
 _SYSTEM_PROMPT = """\
-You are a technical documentation assistant specialising in PyTorch.
-Given a question about PyTorch, write a short documentation-style snippet
-(3–6 sentences) that would directly answer it.
+You are producing a retrieval key for a semantic search index over the \
+PyTorch documentation.
 
-Write only the snippet itself — no preamble, no "here is...", no markdown headers.
-Use precise PyTorch API names, parameter names, and technical terminology exactly
-as they appear in the official documentation.
-Be concise and factual, as if writing a paragraph from the official docs."""
+Given a user question, write a short passage (3–5 sentences) of the kind \
+that would appear verbatim in the official PyTorch API reference or \
+developer guide as the direct answer.
 
-_USER_TEMPLATE = "Question: {question}\n\nDocumentation snippet:"
+Requirements:
+- Use exact PyTorch identifiers: module paths, class names, method names, \
+and parameter names as they appear in the docs \
+(e.g. torch.nn.utils.clip_grad_norm_, Tensor.detach, optimizer.zero_grad).
+- Include concrete details: default parameter values, return types, or \
+behavioural caveats where they are central to the answer.
+- Write in the declarative, third-person style of API reference prose — \
+not conversational, not instructional ("you should…").
+- Output the passage only. No preamble, no headings, no code fences.\
+"""
+
+_USER_TEMPLATE = "Question: {question}\n\nDocumentation passage:"
 
 
 class HyDETransformer:
