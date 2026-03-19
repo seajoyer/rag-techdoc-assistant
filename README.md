@@ -5,13 +5,14 @@
 [![Qdrant](https://img.shields.io/badge/vector%20store-Qdrant-red?logo=qdrant&logoColor=white)](https://qdrant.tech/)
 [![Telegram Bot](https://img.shields.io/badge/Telegram-@techdoc__assistant__bot-2CA5E0?logo=telegram&logoColor=white)](https://t.me/techdoc_assistant_bot)
 
-A retrieval-augmented generation (RAG) system that answers questions about PyTorch using the official documentation as its knowledge base.  It blends dense semantic search with sparse keyword search, merges results through Reciprocal Rank Fusion, and produces citation-backed answers using a hosted LLM — all accessible through a Telegram bot: [@techdoc_assistant_bot](https://t.me/techdoc_assistant_bot).
+A retrieval-augmented generation (RAG) system that answers questions about PyTorch using the official documentation as its knowledge base. It blends dense semantic search with sparse keyword search, merges results through Reciprocal Rank Fusion, optionally reranks with a cross-encoder, and produces citation-backed answers using a hosted LLM — all accessible through a Telegram bot: [@techdoc_assistant_bot](https://t.me/techdoc_assistant_bot).
 
 ---
 
 ## Table of Contents
 
 - [How It Works](#how-it-works)
+- [Evaluation](#evaluation)
 - [Tech Stack](#tech-stack)
 - [Project Structure](#project-structure)
 - [Ingestion Pipeline](#ingestion-pipeline)
@@ -28,7 +29,7 @@ A retrieval-augmented generation (RAG) system that answers questions about PyTor
 
 ## How It Works
 
-Each incoming question goes through two parallel retrieval paths — dense vector search (BGE-M3 embeddings) and sparse keyword search (FNV-1a feature hashing) — both running against a Qdrant Cloud collection. The results are fused with Reciprocal Rank Fusion, and the top-k chunks are passed to LLaMA 3.3 70B (via Groq) for answer synthesis. Every factual claim in the answer is tagged with an inline `[N]` citation linked back to the source documentation page.
+Each incoming question goes through two parallel retrieval paths — dense vector search (BGE-M3 embeddings) and sparse keyword search (FNV-1a feature hashing) — both running against a Qdrant Cloud collection. The results are fused with Reciprocal Rank Fusion, optionally reranked by a cross-encoder, and the top-k chunks are passed to LLaMA 3.3 70B (via Groq) for answer synthesis. Every factual claim in the answer is tagged with an inline `[N]` citation linked back to the source documentation page.
 
 Dense retrieval is optionally boosted by HyDE (Hypothetical Document Embeddings): the LLM first generates a short hypothetical answer, which is embedded and used as the query vector instead of the raw question — significantly improving recall for API-style queries.
 
@@ -50,7 +51,9 @@ flowchart TD
     QD --> RRF["<b>RRF Fusion + Dedup</b><br/>Reciprocal Rank Fusion"]:::fusion
     QS --> RRF
 
-    RRF --> K["Top-k Ranked Chunks"]:::chunks
+    RRF --> RE["<b>Cross-Encoder Reranker</b><br/><i>ms-marco-MiniLM-L-6-v2</i><br/><i>(optional)</i>"]:::optional
+
+    RE --> K["Top-k Ranked Chunks"]:::chunks
 
     K --> LLM["<b>Groq · LLaMA 3.3 70B</b>"]:::llm
 
@@ -70,12 +73,29 @@ flowchart TD
 
 ---
 
+## Evaluation
+
+RAGAS evaluation on 20 hand-curated PyTorch questions, judged by LLaMA 3.3 70B against Claude Sonnet 4.6 reference answers.
+
+| Metric | Score | What it measures |
+|---|:---:|---|
+| Answer Relevancy | **0.90** | Is the answer on-topic for the question? |
+| Faithfulness | **0.88** | Is every claim grounded in the retrieved context? |
+| Context Precision | **0.73** | Are retrieved chunks actually useful for the reference answer? |
+| Context Recall | **0.73** | Does the retrieved context cover all claims in the reference? |
+| Answer Correctness | **0.67** | How factually correct is the answer compared to the reference? |
+
+The retrieval scores (precision / recall ≈ 0.73) are the main lever for improvement. Adding the cross-encoder reranker narrows the precision gap by re-ordering the RRF shortlist before it reaches the LLM. The answer correctness gap (0.67) is expected: LLaMA 3.3 70B sometimes produces a correct but differently-worded answer that the embedding-based AnswerCorrectness metric penalises.
+
+---
+
 ## Tech Stack
 
 | Component | Technology |
 |---|---|
 | Dense embeddings | `BAAI/bge-m3` via `FlagEmbedding` (local, CUDA/CPU) |
 | Sparse embeddings | FNV-1a feature hashing + Qdrant IDF modifier |
+| Reranker | `cross-encoder/ms-marco-MiniLM-L-6-v2` via `sentence-transformers` (optional) |
 | Vector database | Qdrant Cloud (hybrid named-vector collection) |
 | Fusion | Reciprocal Rank Fusion (Qdrant Query API ≥ 1.9) |
 | Query expansion | HyDE (Hypothetical Document Embeddings) |
@@ -106,7 +126,8 @@ rag-techdoc-assistant/
 │   ├── 01_data_acquisition.ipynb  # crawl & convert PyTorch docs
 │   ├── 02_chunking.ipynb          # split pages into retrieval units
 │   ├── 03_embedding_ingestion.ipynb  # embed chunks & upsert to Qdrant
-│   └── 04_rag_chain.ipynb         # query the chain end-to-end
+│   ├── 04_rag_chain.ipynb         # query the chain end-to-end
+│   └── 05_ragas_evaluation.ipynb  # RAGAS evaluation against reference answers
 │
 ├── src/
 │   ├── data_acquisition/
@@ -118,22 +139,28 @@ rag-techdoc-assistant/
 │   │   └── pipeline.py            # DocPage dataclass + orchestration
 │   │
 │   ├── chunking/
-│   │   └── chunker.py             # ChunkSplitter + Chunk dataclass
+│   │   ├── chunker.py             # ChunkSplitter + Chunk dataclass
+│   │   └── incremental.py         # resumable chunk splitting with JSONL cache
 │   │
 │   ├── embedding/
 │   │   ├── embedder.py            # BGEM3Embedder (local CUDA / CPU)
 │   │   ├── hf_embedder.py         # HFInferenceEmbedder (API fallback)
 │   │   ├── sparse.py              # feature-hashed sparse vectors
-│   │   └── cache.py               # vector cache to avoid re-embedding
+│   │   ├── cache.py               # vector cache to avoid re-embedding
+│   │   └── lc_adapter.py          # LangChain Embeddings shim
 │   │
 │   ├── retrieval/
-│   │   └── hyde.py                # HyDE query transformer
+│   │   ├── hyde.py                # HyDE query transformer
+│   │   └── reranker.py            # cross-encoder reranker (sentence-transformers)
 │   │
 │   ├── vectorstore/
 │   │   └── store.py               # QdrantDocStore + HybridQdrantRetriever
 │   │
-│   └── rag/
-│       └── chain.py               # build_rag_chain, RAGResult, SourceRef
+│   ├── rag/
+│   │   └── chain.py               # build_rag_chain, RAGResult, SourceRef, stream_rag
+│   │
+│   └── evaluation/
+│       └── ragas_runner.py        # checkpoint-backed RAGAS evaluation loop
 │
 └── bot/
     ├── main.py                    # entry point, lifecycle hooks
@@ -159,7 +186,7 @@ The knowledge base is built by running four notebooks in order. Each is self-con
 | Notebook | Stage | Output |
 |---|---|---|
 | `01_data_acquisition` | Crawl `docs.pytorch.org`, clean HTML, convert to Markdown | `data/pytorch_docs/` — one `.md` per page + `_index.jsonl` manifest |
-| `02_chunking` | Split pages on structural boundaries; merge stubs; sub-split large sections | `Chunk` objects |
+| `02_chunking` | Split pages on structural boundaries; merge stubs; sub-split large sections | `_chunks.jsonl` |
 | `03_embedding_ingestion` | Embed chunks with BGE-M3; upsert dense + sparse vectors to Qdrant | Populated hybrid collection |
 | `04_rag_chain` | Run queries end-to-end; inspect `RAGResult` with answer + citations | — |
 
@@ -182,7 +209,7 @@ MAX_PAGES = None          # None = full crawl (~2 750 pages)
 RPS       = 2.0           # requests per second — be polite
 ```
 
-The pipeline is resumable: already-saved URLs are tracked in `_index.jsonl`, so re-running the notebook is a no-op for completed pages — no `resume` flag needed.
+The pipeline is resumable: already-saved URLs are tracked in `_index.jsonl`, so re-running the notebook is a no-op for completed pages.
 
 ### Stage 2 — Chunking
 
@@ -194,7 +221,7 @@ Loads the saved pages and splits them into `Chunk` objects using a three-step st
 2. **Stub merge** — sections below `min_chars` are merged forward into the next chunk to avoid tiny retrieval units.
 3. **Overlap sub-split** — sections exceeding `max_chars` are broken at paragraph boundaries, with a configurable tail copied into the start of the next sub-chunk for continuity.
 
-Each `Chunk` carries the `page_url`, `citation_url` (deep-link with anchor), `kind` (`heading` vs API type), `symbol`, and `keywords` for the sparse leg.
+Each `Chunk` carries the `page_url`, `citation_url` (deep-link with anchor), `kind` (`heading` vs Sphinx API type), `symbol`, and `keywords` for the sparse leg.
 
 ### Stage 3 — Embedding & Ingestion
 
@@ -202,7 +229,7 @@ Each `Chunk` carries the `page_url`, `citation_url` (deep-link with anchor), `ki
 
 - Embeds all chunks with `BGEM3Embedder` (1 024-dim, L2-normalised, cached to `_vectors.npy` for incremental runs).
 - Computes sparse vectors via `keywords_to_sparse` (FNV-1a TF weights).
-- Creates (or re-uses) a Qdrant hybrid collection with named vectors `dense` and `sparse`.
+- Creates (or re-uses) a Qdrant hybrid collection with named vectors `dense` and `keywords`.
 - Upserts chunks with their payloads using batched `upsert_chunks`.
 
 ### Stage 4 — RAG Chain Exploration
@@ -343,11 +370,13 @@ Run notebooks `01` through `03` in order (see [Ingestion Pipeline](#ingestion-pi
 
 **Split-channel HyDE.** The HyDE transformer generates a hypothetical documentation snippet and uses it *only* for the dense embedding. The sparse leg always receives the original query. This keeps exact symbol names (e.g. `torch.autocast`) firmly in the keyword leg where they belong, while letting the dense leg operate on semantically richer text.
 
+**Optional cross-encoder reranking.** After RRF fusion, an optional `CrossEncoderReranker` scores every (query, passage) pair with `cross-encoder/ms-marco-MiniLM-L-6-v2`. The bi-encoder retrieves a wider candidate pool (`top_k × multiplier`, e.g. 24 for `top_k=6`), and the cross-encoder re-orders it before the final slice. This adds a small latency overhead (~50–200 ms on CPU for 24 candidates) but tightens context precision by catching relevance signals that independent query and document embeddings miss. The reranker degrades gracefully: if `sentence-transformers` is not installed it falls back to a no-op, preserving the RRF order.
+
 **Feature-hashed sparse vectors.** Using a vocabulary-free hashing trick (FNV-1a, 2¹⁷ buckets) means new pages can be upserted at any time without rebuilding a vocabulary artefact. Qdrant's IDF modifier applies collection-level IDF to queries at search time, giving BM25-like scoring without any offline IDF computation.
 
 **Structured RAG output.** `build_rag_chain` returns a `RAGResult` dataclass — not a raw string. Citation markers (`[N]`) in the answer are resolved back to `SourceRef` objects (URL, title, symbol) before the result is returned, so callers never need to parse footnotes themselves.
 
-**Resumable crawl.** The data acquisition pipeline tracks already-saved URLs in `_index.jsonl`. Re-running the notebook is a no-op for completed pages, making incremental updates straightforward.
+**Resumable crawl.** The data acquisition pipeline tracks already-saved URLs in `_index.jsonl`. Re-running the notebook is a no-op for completed pages, making incremental updates straightforward. The same pattern applies to chunking (`_chunks.jsonl`) and embedding (`_vectors.npy` + `_vector_ids.json`).
 
 ---
 
@@ -393,10 +422,6 @@ It's also worth noting that `torch.tensor()` creates a tensor with no autograd
 history, whereas `torch.Tensor` can be created with `requires_grad=True` to
 record operations for automatic differentiation [3]. 
 
-In summary, `torch.tensor` is a function that creates a tensor, while
-`torch.Tensor` is a class that represents a tensor, and it's recommended to use
-the `torch.tensor()` function to create tensors [2][1].
-
 Sources
 ----------------------------------------
   [1] torch.Tensor
@@ -441,7 +466,7 @@ It is useful for inference, when you are sure that you will not call
 would otherwise have `requires_grad=True` [1]. 
 
 You should use `torch.no_grad()` when you need to perform operations that
-should not be recorded by autograd, but you’d still like to use the outputs of
+should not be recorded by autograd, but you'd still like to use the outputs of
 these computations in grad mode later [2]. For example, it might be useful
 when writing an optimizer or when initializing parameters in `torch.nn.init` to
 avoid autograd tracking when updating the initialized parameters in-place [2]. 
