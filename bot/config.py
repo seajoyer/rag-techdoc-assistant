@@ -60,6 +60,13 @@ class Settings(BaseSettings):
     temperature: float = Field(0.0,   validation_alias="TEMPERATURE")
     hyde_enabled: bool  = Field(True,  validation_alias="HYDE_ENABLED")
 
+    # ── Reranker ──────────────────────────────────────────────────────────────
+    reranker_enabled: bool  = Field(False, validation_alias="RERANKER_ENABLED")
+    reranker_alpha:   float = Field(0.7,   validation_alias="RERANKER_ALPHA")
+    # Candidates fetched from Qdrant before reranking; final_top_k = top_k.
+    # Set higher than top_k so the CE has more material to reorder.
+    reranker_top_k:   int   = Field(12,    validation_alias="RERANKER_TOP_K")
+
     # ── Streaming (Telegram Bot API 9.5+ sendMessageDraft) ────────────────
     # When True the bot streams token-by-token previews in private chats.
     # Falls back to the standard path automatically for group chats or when

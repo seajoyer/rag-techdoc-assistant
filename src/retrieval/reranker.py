@@ -1,206 +1,261 @@
 """
 reranker.py
 -----------
-Cross-encoder reranker for the hybrid retrieval pipeline.
+Cross-encoder reranker with RRF-score fusion for hybrid retrieval.
 
-Role in the pipeline
+Design
+~~~~~~
+After the Qdrant hybrid search produces an RRF-ranked candidate list, the
+cross-encoder rescores each (query, passage) pair with a full attention pass.
+The two signals are then blended:
+
+    final = α · ce_norm + (1 − α) · rrf_norm
+
+where both scores are min-max normalised to [0, 1] within the batch before
+blending.  Neither signal fully overrides the other:
+
+    dense / sparse / RRF  → strong at exact symbol matching and recall
+    cross-encoder         → strong at semantic relevance and precision
+
+Typical alpha values
 ~~~~~~~~~~~~~~~~~~~~
-The hybrid search (dense ANN + sparse IDF, fused with RRF) is a fast
-*bi-encoder* system: query and documents are embedded independently and
-matched by vector similarity.  That trade-off favours recall over
-precision.
+    α = 0.0   pure RRF  (CE is a no-op; model is never loaded)
+    α = 0.5   equal weight
+    α = 0.7   CE-leaning — good default for prose questions
+    α = 1.0   pure CE  (RRF score ignored after retrieval)
 
-A *cross-encoder* sees the query and the full document text concatenated,
-so it can model fine-grained query–document interactions that bi-encoders
-miss.  The cost is that it must score every candidate pair individually
-(O(N) forward passes), so it is applied only on the small shortlist
-returned by the fast retriever, not on the full collection.
+Model
+~~~~~
+``cross-encoder/ms-marco-MiniLM-L-6-v2`` is the default: ~22 MB,
+~50–200 ms on CPU for 24 candidates, strong on passage relevance.
+Swap to ``BAAI/bge-reranker-v2-m3`` for multilingual or heavier workloads.
 
-Integration
-~~~~~~~~~~~
-``CrossEncoderReranker`` is an optional component of
-``HybridQdrantRetriever``.  When present:
+Usage
+~~~~~
+    from src.retrieval import CrossEncoderReranker
 
-1.  ``hybrid_search`` is called with ``top_k * rerank_top_k_multiplier``
-    to fetch a wider candidate pool (e.g. 24 candidates for top_k=6).
-2.  The reranker scores all candidates and re-orders them by
-    cross-encoder score.
-3.  The retriever returns the top ``top_k`` documents from the
-    reranked list, continuing to the existing deduplication step.
-
-Degrading gracefully
-~~~~~~~~~~~~~~~~~~~~
-If ``sentence_transformers`` is not installed (e.g. in the CPU Docker
-image used with EMBEDDER_MODE=hf), the reranker falls back to a no-op
-that preserves the original RRF order and logs a one-time warning.
-Callers never need to handle an ImportError.
-
-Model choices
-~~~~~~~~~~~~~
-``cross-encoder/ms-marco-MiniLM-L-6-v2``  — default; ~22 MB, fast, good
-``cross-encoder/ms-marco-MiniLM-L-12-v2`` — ~33 MB, ~15 % better on BEIR
-``cross-encoder/ms-marco-electra-base``   — ~110 MB, best quality
-
-All three are trained on MS MARCO passage ranking and transfer well to
-technical documentation retrieval.
+    reranker = CrossEncoderReranker()            # lazy model load
+    retriever = store.as_retriever(
+        top_k=12,                                # fetch more candidates ...
+        reranker=reranker,
+        reranker_alpha=0.7,                      # CE-leaning blend
+        final_top_k=6,                           # ... keep fewer after rerank
+    )
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import TYPE_CHECKING
+
+import numpy as np
+
+if TYPE_CHECKING:
+    from langchain_core.documents import Document
 
 log = logging.getLogger(__name__)
 
-# Default model: lightweight, ships in ~22 MB, runs in < 1 s on CPU for
-# batches of 24 passages up to 512 tokens.
 _DEFAULT_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+_DEFAULT_ALPHA = 0.7
 
-# Log the unavailability warning at most once per process.
-_WARNED_UNAVAILABLE = False
+
+# ---------------------------------------------------------------------------
+# Score normalisation helpers
+# ---------------------------------------------------------------------------
+
+
+def _minmax_norm(scores: np.ndarray) -> np.ndarray:
+    """
+    Min-max normalise *scores* to [0, 1].
+
+    When all scores are identical (including the degenerate single-item case)
+    every element is mapped to 0.5 so the blending formula stays neutral
+    rather than producing NaN or all-zeros.
+    """
+    lo, hi = float(scores.min()), float(scores.max())
+    span = hi - lo
+    if span < 1e-9:
+        return np.full_like(scores, 0.5, dtype=np.float32)
+    return ((scores - lo) / span).astype(np.float32)
+
+
+# ---------------------------------------------------------------------------
+# CrossEncoderReranker
+# ---------------------------------------------------------------------------
 
 
 class CrossEncoderReranker:
     """
-    Rerank a candidate list using a cross-encoder model.
+    Cross-encoder reranker that blends CE relevance with RRF retrieval scores.
 
     Parameters
     ----------
-    model_name:
-        HuggingFace model ID.  Defaults to
-        ``cross-encoder/ms-marco-MiniLM-L-6-v2``.
-    top_k_multiplier:
-        How many times more candidates to request from the bi-encoder
-        retriever than the final ``top_k``.  For example, with
-        ``top_k=6`` and ``top_k_multiplier=4`` the retriever fetches 24
-        candidates which the cross-encoder then re-orders.
-        Higher values improve recall at the cost of reranking latency.
+    model_name_or_path:
+        HuggingFace model ID or local path.
+        Defaults to ``cross-encoder/ms-marco-MiniLM-L-6-v2``.
     max_length:
-        Token truncation limit for the cross-encoder.  512 matches the
-        BGE-M3 dense encoder and is safe for all three recommended models.
-    batch_size:
-        Number of (query, passage) pairs scored in one forward pass.
-        32 fits comfortably on CPU; increase to 64+ on GPU.
+        Token truncation for the concatenated [query; passage] input.
     device:
-        ``"cuda"``, ``"cpu"``, or ``None`` for automatic selection.
+        ``"cuda"``, ``"cpu"``, or ``None`` for auto-select.
+    default_alpha:
+        Default blend weight when callers do not pass one explicitly.
+        ``1.0`` = pure CE; ``0.0`` = pure RRF; ``0.7`` = CE-leaning.
     """
 
     def __init__(
         self,
-        model_name: str = _DEFAULT_MODEL,
-        top_k_multiplier: int = 4,
+        model_name_or_path: str = _DEFAULT_MODEL,
         max_length: int = 512,
-        batch_size: int = 32,
         device: str | None = None,
+        default_alpha: float = _DEFAULT_ALPHA,
     ) -> None:
-        self.top_k_multiplier = top_k_multiplier
-        self._model: Any | None = None
-        self._available = False
+        self._model_name   = model_name_or_path
+        self._max_length   = max_length
+        self._device       = device     # None → auto-selected at load time
+        self.default_alpha = default_alpha
+        self._model        = None       # lazy — loaded on first rerank() call
+
+    # ------------------------------------------------------------------
+    # Lazy model loading
+    # ------------------------------------------------------------------
+
+    def _ensure_model(self) -> None:
+        """Load the CrossEncoder model on first use."""
+        if self._model is not None:
+            return
 
         try:
             from sentence_transformers import CrossEncoder  # type: ignore[import]
+        except ImportError as exc:
+            raise ImportError(
+                "sentence-transformers is required for CrossEncoderReranker. "
+                "Install the reranker extra:  uv sync --extra reranker"
+            ) from exc
 
-            import torch as _torch
-            _device = device or ("cuda" if _torch.cuda.is_available() else "cpu")
+        if self._device is None:
+            try:
+                import torch
+                self._device = "cuda" if torch.cuda.is_available() else "cpu"
+            except ImportError:
+                self._device = "cpu"
 
-            log.info(
-                "[Reranker] Loading cross-encoder | model=%s | device=%s",
-                model_name, _device,
-            )
-            self._model = CrossEncoder(
-                model_name,
-                max_length=max_length,
-                device=_device,
-            )
-            self._batch_size = batch_size
-            self._available = True
-            log.info("[Reranker] Cross-encoder ready | model=%s", model_name)
-
-        except ImportError:
-            global _WARNED_UNAVAILABLE
-            if not _WARNED_UNAVAILABLE:
-                log.warning(
-                    "[Reranker] sentence-transformers is not installed — "
-                    "reranker will be a no-op.  "
-                    "Install it with:  pip install sentence-transformers"
-                )
-                _WARNED_UNAVAILABLE = True
+        self._model = CrossEncoder(
+            self._model_name,
+            max_length=self._max_length,
+            device=self._device,
+        )
+        log.info(
+            "CrossEncoderReranker ready — model: %s | device: %s | max_length: %d",
+            self._model_name, self._device, self._max_length,
+        )
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
-    @property
-    def available(self) -> bool:
-        """True when the cross-encoder model loaded successfully."""
-        return self._available
-
     def rerank(
         self,
         query: str,
-        candidates: list[tuple[dict, float]],
-    ) -> list[tuple[dict, float]]:
+        docs: list["Document"],
+        rrf_scores: list[float],
+        alpha: float | None = None,
+    ) -> list["Document"]:
         """
-        Re-score and re-order *candidates* using the cross-encoder.
+        Rerank *docs* by blending cross-encoder relevance with RRF scores.
 
-        When the model is unavailable (``available == False``) the
-        original *candidates* list is returned unchanged, preserving
-        the RRF ordering as a fallback.
+        Score metadata written to each document
+        ----------------------------------------
+        ``score``            — final blended score used for ranking downstream
+        ``rrf_score``        — original (unnormalised) RRF score from Qdrant
+        ``rrf_score_norm``   — RRF score normalised to [0, 1]
+        ``ce_score_raw``     — raw CE logit (useful for threshold tuning)
+        ``ce_score``         — CE score normalised to [0, 1]
+
+        ``score`` is overwritten in-place so all downstream code (Telegram
+        bot, ``show_results``, evaluation notebooks) keeps working unchanged.
 
         Parameters
         ----------
         query:
-            The original natural-language query string.
-        candidates:
-            List of ``(payload_dict, rrf_score)`` tuples as returned by
-            ``QdrantDocStore.hybrid_search()``.
+            The original user question — not the HyDE snippet.  The CE sees
+            the same text the user typed for faithful relevance estimation.
+        docs:
+            Candidate documents in RRF rank order.
+        rrf_scores:
+            Parallel list of RRF scores corresponding to *docs*.
+        alpha:
+            Blend weight for the CE signal.  Falls back to
+            ``self.default_alpha`` when *None*.
 
         Returns
         -------
-        list[tuple[dict, float]]
-            Same structure as the input but re-ordered by cross-encoder
-            score (descending), with the cross-encoder score replacing
-            the original RRF score so that downstream logging stays
-            meaningful.
+        list[Document]
+            The same documents, reordered by descending blended score.
         """
-        if not self._available or not candidates:
-            return candidates
+        if not docs:
+            return docs
 
-        texts = [payload.get("text", "") for payload, _ in candidates]
-        pairs = [[query, text] for text in texts]
+        alpha = self.default_alpha if alpha is None else float(alpha)
 
-        log.info(
-            "[Reranker] Scoring %d candidate(s) | query=%r",
-            len(pairs), query,
-        )
+        # alpha == 0 → pure RRF order; stamp metadata and return early.
+        if alpha == 0.0:
+            for doc, rrf in zip(docs, rrf_scores):
+                doc.metadata["rrf_score"] = float(rrf)
+            log.info("[Reranker] alpha=0.0 — skipping CE, returning RRF order as-is")
+            return docs
 
-        scores: list[float] = self._model.predict(
-            pairs,
-            batch_size=self._batch_size,
-            show_progress_bar=False,
-            convert_to_numpy=True,
-        ).tolist()
+        self._ensure_model()
 
-        reranked = sorted(
-            zip(candidates, scores),
-            key=lambda x: x[1],
-            reverse=True,
-        )
-
-        result = [(payload, ce_score) for (payload, _rrf), ce_score in reranked]
+        # ── Cross-encoder scoring ─────────────────────────────────────────
+        pairs  = [[query, doc.page_content] for doc in docs]
 
         log.info(
-            "[Reranker] Reranked %d candidates | top score=%.4f | bottom score=%.4f",
-            len(result),
-            result[0][1] if result else 0.0,
-            result[-1][1] if result else 0.0,
+            "[Reranker] Scoring %d pairs | model=%s | alpha=%.2f",
+            len(pairs), self._model_name, alpha,
         )
-        for rank, (payload, score) in enumerate(result[:6], 1):
-            log.info(
-                "[Reranker]   [%d] ce_score=%.4f  kind=%-12s  symbol=%s",
-                rank, score,
-                payload.get("kind", "?"),
-                payload.get("symbol") or "—",
+
+        # CrossEncoder.predict() accepts a list of [query, passage] pairs and
+        # returns a numpy array of raw logits.
+        raw_ce_arr: np.ndarray = self._model.predict(pairs, show_progress_bar=False)
+        raw_ce = raw_ce_arr.tolist()
+
+        log.info(
+            "[Reranker] CE raw scores | n=%d  min=%.3f  max=%.3f  mean=%.3f",
+            len(raw_ce), min(raw_ce), max(raw_ce),
+            sum(raw_ce) / len(raw_ce),
+        )
+
+        # ── Normalise both vectors to [0, 1] ──────────────────────────────
+        ce_norm  = _minmax_norm(np.array(raw_ce,     dtype=np.float32))
+        rrf_norm = _minmax_norm(np.array(rrf_scores, dtype=np.float32))
+
+        # ── Blend ─────────────────────────────────────────────────────────
+        blended = alpha * ce_norm + (1.0 - alpha) * rrf_norm
+
+        # ── Write scores back to metadata ─────────────────────────────────
+        for doc, rrf_raw, ce_raw, ce_n, rrf_n, blend in zip(
+            docs, rrf_scores, raw_ce, ce_norm, rrf_norm, blended
+        ):
+            doc.metadata.update(
+                rrf_score      = float(rrf_raw),
+                rrf_score_norm = float(rrf_n),
+                ce_score_raw   = float(ce_raw),
+                ce_score       = float(ce_n),
+                score          = float(blend),   # replaces pre-rerank RRF score
             )
 
-        return result
+        reranked = sorted(docs, key=lambda d: d.metadata["score"], reverse=True)
+
+        log.info("[Reranker] Final ranking (alpha=%.2f):", alpha)
+        for rank, doc in enumerate(reranked, 1):
+            m = doc.metadata
+            log.info(
+                "[Reranker]   [%d] blend=%.4f  ce=%.4f  rrf=%.4f  symbol=%s",
+                rank,
+                m["score"],
+                m["ce_score"],
+                m["rrf_score_norm"],
+                m.get("symbol") or "—",
+            )
+
+        return reranked

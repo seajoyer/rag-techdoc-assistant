@@ -46,22 +46,15 @@ always uses the original query for exact keyword matching.
 
 Cross-encoder reranking
 ~~~~~~~~~~~~~~~~~~~~~~~
-When a ``CrossEncoderReranker`` is attached to ``HybridQdrantRetriever``,
-the pipeline gains a third stage:
+``HybridQdrantRetriever`` optionally runs a ``CrossEncoderReranker`` after
+deduplication.  The reranker blends CE relevance with the preserved RRF
+scores using configurable alpha:
 
-1.  ``hybrid_search`` is called with ``top_k * reranker.top_k_multiplier``
-    candidates (e.g. 24 for top_k=6, multiplier=4) so the reranker has a
-    richer pool to choose from.
-2.  The cross-encoder scores every (query, passage) pair and re-orders the
-    shortlist.  The bi-encoder RRF score is replaced by the cross-encoder
-    score in the returned tuples.
-3.  The retriever slices ``top_k`` results from the reranked list and
-    continues to the existing deduplication step unchanged.
+    final = α · ce_norm + (1 − α) · rrf_norm
 
-The reranker is fully optional: when absent the retriever behaves exactly
-as before.  When the ``sentence_transformers`` package is not installed the
-reranker falls back to a no-op that preserves RRF ordering, so the
-Dockerfile never needs to change.
+Pass ``top_k`` larger than usual (e.g. 12–20) and use ``final_top_k`` to
+control how many documents are returned after reranking.  Fetching more
+candidates gives the CE more material to promote the truly relevant chunks.
 """
 
 from __future__ import annotations
@@ -104,9 +97,9 @@ log = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-DENSE_VECTOR = "dense"
+DENSE_VECTOR  = "dense"
 SPARSE_VECTOR = "keywords"
-DENSE_DIM = 1024
+DENSE_DIM     = 1024
 
 
 # ---------------------------------------------------------------------------
@@ -133,9 +126,9 @@ class QdrantDocStore:
         collection_name: str,
         embedder: BGEM3Embedder,
     ) -> None:
-        self.client = client
+        self.client          = client
         self.collection_name = collection_name
-        self.embedder = embedder
+        self.embedder        = embedder
 
     # ------------------------------------------------------------------
     # Collection management
@@ -188,10 +181,10 @@ class QdrantDocStore:
         """Return a plain dict summarising collection stats."""
         info = self.client.get_collection(self.collection_name)
         return {
-            "name": self.collection_name,
-            "points_count": info.points_count,
+            "name":                  self.collection_name,
+            "points_count":          info.points_count,
             "indexed_vectors_count": info.indexed_vectors_count,
-            "status": info.status.value,
+            "status":                info.status.value,
         }
 
     # ------------------------------------------------------------------
@@ -230,9 +223,9 @@ class QdrantDocStore:
 
         total = len(chunks)
         for start in range(0, total, batch_size):
-            end = min(start + batch_size, total)
+            end          = min(start + batch_size, total)
             batch_chunks = chunks[start:end]
-            batch_vecs = dense_vectors[start:end]
+            batch_vecs   = dense_vectors[start:end]
             points = [
                 _chunk_to_point(chunk, vec)
                 for chunk, vec in zip(batch_chunks, batch_vecs)
@@ -299,7 +292,7 @@ class QdrantDocStore:
         q_dense = q_dense.tolist()
 
         # --- Sparse query vector ------------------------------------------
-        q_tokens = tokenize_query(query)
+        q_tokens    = tokenize_query(query)
         log.info(
             "[Sparse] Query tokens (%d) | tokens=%s",
             len(q_tokens), q_tokens,
@@ -366,6 +359,8 @@ class QdrantDocStore:
         score_threshold: float | None = None,
         hyde: "HyDETransformer | None" = None,
         reranker: "CrossEncoderReranker | None" = None,
+        reranker_alpha: float = 0.7,
+        final_top_k: int | None = None,
     ) -> "HybridQdrantRetriever":
         """
         Return a LangChain ``BaseRetriever`` backed by this store.
@@ -373,12 +368,15 @@ class QdrantDocStore:
         Parameters
         ----------
         top_k:
-            Maximum number of documents returned per query.
+            Candidates fetched from Qdrant (before reranking).  When a
+            reranker is supplied, set this higher than the number of results
+            you ultimately want — e.g. ``top_k=12, final_top_k=6`` — so the
+            CE has more material to reorder.
         filter_:
             Optional Qdrant payload filter (section, kind, symbol, etc.).
         score_threshold:
-            Drop results with score below this value after reranking (or
-            after RRF when no reranker is attached).  None = keep all.
+            Drop results whose *final* score (after blending, if reranking)
+            is below this value.  None = keep all.
         hyde:
             Optional ``HyDETransformer`` instance.  When set, the retriever
             generates a hypothetical documentation snippet before each search
@@ -386,11 +384,15 @@ class QdrantDocStore:
             natural-language questions.
         reranker:
             Optional ``CrossEncoderReranker`` instance.  When set, the
-            retriever fetches ``top_k * reranker.top_k_multiplier``
-            candidates from Qdrant and re-orders them with the cross-encoder
-            before returning the final ``top_k`` documents.  This adds a
-            small latency overhead (~50–200 ms on CPU for 24 candidates) but
-            significantly improves context precision and recall.
+            retriever runs a cross-encoder pass over the deduplicated
+            candidates and blends CE relevance with the RRF score.
+        reranker_alpha:
+            Blend weight passed to the reranker.  ``1.0`` = pure CE;
+            ``0.0`` = pure RRF; ``0.7`` (default) = CE-leaning.
+            Ignored when *reranker* is ``None``.
+        final_top_k:
+            Maximum documents returned after reranking.  Defaults to
+            *top_k* when not set.  Only meaningful when *reranker* is given.
 
         Returns
         -------
@@ -404,6 +406,8 @@ class QdrantDocStore:
             score_threshold=score_threshold,
             hyde=hyde,
             reranker=reranker,
+            reranker_alpha=reranker_alpha,
+            final_top_k=final_top_k if final_top_k is not None else top_k,
         )
 
 
@@ -429,27 +433,24 @@ class HybridQdrantRetriever(BaseRetriever):
     documentation snippet (via a fast LLM call to Groq).  That snippet is
     embedded for the dense leg; the original query is used for sparse search.
 
-    Cross-encoder reranking
-    ~~~~~~~~~~~~~~~~~~~~~~~
-    When ``reranker`` is set:
-
-    1.  The bi-encoder retrieves ``top_k * reranker.top_k_multiplier``
-        candidates from Qdrant (a wider pool than the final ``top_k``).
-    2.  The cross-encoder scores every (query, passage) pair and re-orders
-        the shortlist by relevance.
-    3.  The retriever slices the top ``top_k`` documents and passes them to
-        the existing deduplication step.
-
-    The score stored in ``doc.metadata["score"]`` reflects the cross-encoder
-    logit when reranking is active, and the RRF score otherwise, so logging
-    and ``score_threshold`` filtering remain consistent across both modes.
+    Reranking
+    ~~~~~~~~~
+    When ``reranker`` is set, deduplicated candidates are passed through the
+    cross-encoder and their ``score`` metadata values are replaced with the
+    blended CE + RRF score.  ``final_top_k`` controls how many documents are
+    returned after the rerank slice; ``top_k`` controls how many candidates
+    are fetched from Qdrant (should be larger to give the CE more to work
+    with).
     """
-    top_k: int = 6
-    store: QdrantDocStore = Field(repr=False)
-    hyde: HyDETransformer | None = Field(default=None, repr=False)
-    reranker: CrossEncoderReranker | None = Field(default=None, repr=False)
-    filter_: models.Filter | None = Field(default=None, repr=False)
-    score_threshold: float | None = None
+
+    top_k:          int                           = 6
+    final_top_k:    int                           = 6
+    store:          QdrantDocStore                = Field(repr=False)
+    hyde:           HyDETransformer | None        = Field(default=None, repr=False)
+    reranker:       CrossEncoderReranker | None   = Field(default=None, repr=False)
+    reranker_alpha: float                         = 0.7
+    filter_:        models.Filter | None          = Field(default=None, repr=False)
+    score_threshold: float | None                 = None
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     def _get_relevant_documents(
@@ -467,52 +468,21 @@ class HybridQdrantRetriever(BaseRetriever):
         else:
             log.info("[Retriever] HyDE disabled — using raw query for dense leg")
 
-        # -- Determine candidate pool size -----------------------------------
-        # When a reranker is attached, fetch a wider pool so the cross-encoder
-        # has richer material to work with.  Without a reranker the pool size
-        # stays at the standard top_k (hybrid_search applies its own internal
-        # prefetch_multiplier for the RRF fusion step).
-        candidate_k = (
-            self.top_k * self.reranker.top_k_multiplier
-            if self.reranker is not None and self.reranker.available
-            else self.top_k
-        )
-
-        log.info(
-            "[Retriever] Fetching %d candidate(s) | reranker=%s",
-            candidate_k,
-            "enabled" if (self.reranker is not None and self.reranker.available) else "disabled",
-        )
-
         results = self.store.hybrid_search(
             query=query,
-            top_k=candidate_k,
+            top_k=self.top_k,
             filter_=self.filter_,
             dense_query=dense_query,
         )
 
-        # -- Cross-encoder reranking ----------------------------------------
-        if self.reranker is not None and self.reranker.available:
-            results = self.reranker.rerank(query, results)
-            # Slice to the requested top_k *before* dedup so that we always
-            # return at most top_k results even when dedup removes entries.
-            results = results[: self.top_k]
-
         # -- Deduplication: one chunk per symbol / prose section -------------
-        seen: set[str] = set()
-        docs: list[Document] = []
-        dropped_threshold = 0
-        dropped_dedup = 0
+        seen:              set[str]      = set()
+        deduped_docs:      list[Document] = []
+        deduped_rrf:       list[float]    = []
+        dropped_threshold                = 0
+        dropped_dedup                    = 0
 
-        for payload, score in results:
-            if self.score_threshold is not None and score < self.score_threshold:
-                log.debug(
-                    "[Retriever] Dropped (below threshold %.4f): score=%.4f symbol=%s",
-                    self.score_threshold, score, payload.get("symbol") or "—",
-                )
-                dropped_threshold += 1
-                continue
-
+        for payload, rrf_score in results:
             symbol = payload.get("symbol", "")
             if symbol:
                 dedup_key = symbol
@@ -525,8 +495,8 @@ class HybridQdrantRetriever(BaseRetriever):
 
             if dedup_key in seen:
                 log.debug(
-                    "[Retriever] Dropped (duplicate key %r): score=%.4f",
-                    dedup_key, score,
+                    "[Retriever] Dropped (duplicate key %r): rrf_score=%.4f",
+                    dedup_key, rrf_score,
                 )
                 dropped_dedup += 1
                 continue
@@ -534,8 +504,43 @@ class HybridQdrantRetriever(BaseRetriever):
 
             text = payload.get("text", "")
             meta = {k: v for k, v in payload.items() if k != "text"}
-            meta["score"] = score
-            docs.append(Document(page_content=text, metadata=meta))
+            meta["score"] = rrf_score   # may be overwritten by reranker
+            deduped_docs.append(Document(page_content=text, metadata=meta))
+            deduped_rrf.append(rrf_score)
+
+        log.info(
+            "[Retriever] After dedup: %d docs | dropped_dedup=%d",
+            len(deduped_docs), dropped_dedup,
+        )
+
+        # -- Cross-encoder reranking -----------------------------------------
+        if self.reranker is not None and deduped_docs:
+            log.info(
+                "[Retriever] Reranking %d candidates | alpha=%.2f | final_top_k=%d",
+                len(deduped_docs), self.reranker_alpha, self.final_top_k,
+            )
+            deduped_docs = self.reranker.rerank(
+                query=query,             # always the raw query, never HyDE
+                docs=deduped_docs,
+                rrf_scores=deduped_rrf,
+                alpha=self.reranker_alpha,
+            )
+
+        # -- Score threshold filter ------------------------------------------
+        docs: list[Document] = []
+        for doc in deduped_docs:
+            score = doc.metadata.get("score", 0.0)
+            if self.score_threshold is not None and score < self.score_threshold:
+                log.debug(
+                    "[Retriever] Dropped (below threshold %.4f): score=%.4f symbol=%s",
+                    self.score_threshold, score, doc.metadata.get("symbol") or "—",
+                )
+                dropped_threshold += 1
+                continue
+            docs.append(doc)
+
+        # -- Trim to final_top_k --------------------------------------------
+        docs = docs[: self.final_top_k]
 
         log.info(
             "[Retriever] Returning %d docs | dropped_threshold=%d dropped_dedup=%d",

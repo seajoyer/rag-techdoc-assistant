@@ -199,7 +199,26 @@ def _build_chain() -> Any:
         except Exception as exc:
             log.warning("[Service] HyDE init failed (%s) — disabled.", exc)
 
-    retriever = store.as_retriever(top_k=settings.top_k, hyde=hyde)
+    # ── Optional cross-encoder reranker ──────────────────────────────────────
+    reranker = None
+    if settings.reranker_enabled:
+        try:
+            from src.retrieval import CrossEncoderReranker
+            reranker = CrossEncoderReranker(default_alpha=settings.reranker_alpha)
+            log.info(
+                "[Service] CrossEncoderReranker enabled | alpha=%.2f | candidate_top_k=%d",
+                settings.reranker_alpha, settings.reranker_top_k,
+            )
+        except Exception as exc:
+            log.warning("[Service] Reranker init failed (%s) — disabled.", exc)
+
+    retriever = store.as_retriever(
+        top_k=settings.reranker_top_k if reranker else settings.top_k,
+        hyde=hyde,
+        reranker=reranker,
+        reranker_alpha=settings.reranker_alpha,
+        final_top_k=settings.top_k,   # always return top_k docs to the LLM
+    )
 
     # ── Cache components needed by astream_answer ─────────────────────────
     _retriever = retriever
