@@ -3,12 +3,6 @@ ragas_runner.py
 ---------------
 Checkpoint-backed RAGAS evaluation loop, one metric × one sample at a time.
 
-Requirements
-~~~~~~~~~~~~
-    ragas >= 0.3.4
-    langchain-groq >= 0.1
-    openai >= 1.0
-
 Metric import path
 ~~~~~~~~~~~~~~~~~~
 Metrics must be imported from ``ragas.metrics``, not ``ragas.metrics.collections``.
@@ -181,7 +175,7 @@ async def run_evaluation(
         1 for s in checkpoint.values()
         if s and any(_is_missing(v) for v in s.values())
     )
-    print(f"\n✓ Evaluation complete. Checkpoint → {checkpoint_file}")
+    print(f"\n✓ Evaluation complete. Checkpoint -> {checkpoint_file}")
     if null_count:
         print(f"  ⚠ {null_count} sample(s) still have incomplete scores — re-run to retry.")
 
@@ -209,7 +203,7 @@ def _load(path: Path) -> dict:
 
 
 def _save(checkpoint: dict, path: Path) -> None:
-    # Normalise any stray NaN → None before serialising so the file stays
+    # Normalise any stray NaN -> None before serialising so the file stays
     # valid JSON and round-trips cleanly.
     normalised = {
         qid: {k: (None if _is_missing(v) else v) for k, v in scores.items()}

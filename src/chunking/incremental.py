@@ -94,7 +94,7 @@ def split_incremental(
         with chunks_path.open("a", encoding="utf-8") as f:
             for chunk in new_chunks:
                 f.write(json.dumps(chunk.to_dict(), ensure_ascii=False) + "\n")
-        log.info("Appended %d new chunks → %s", len(new_chunks), chunks_path)
+        log.info("Appended %d new chunks -> %s", len(new_chunks), chunks_path)
 
     return existing_chunks + new_chunks
 

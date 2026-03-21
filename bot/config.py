@@ -8,12 +8,12 @@ Embedder modes
 ~~~~~~~~~~~~~~
 ``EMBEDDER_MODE`` controls which backend computes dense vectors:
 
-    local   → BGEM3Embedder   — runs BAAI/bge-m3 on the local GPU/CPU.
+    local   -> BGEM3Embedder   — runs BAAI/bge-m3 on the local GPU/CPU.
                                  Requires torch + FlagEmbedding.
-    hf      → HFInferenceEmbedder — calls the HuggingFace Inference API.
+    hf      -> HFInferenceEmbedder — calls the HuggingFace Inference API.
                                  Requires HUGGINGFACEHUB_API_TOKEN.
-    auto    → Try local first; fall back to HF if torch/FlagEmbedding
-              is unavailable or CUDA isn't present.  (default)
+    auto    -> Try local first; fall back to HF if torch/FlagEmbedding
+               is unavailable or CUDA isn't present.  (default)
 
 Streaming mode
 ~~~~~~~~~~~~~~

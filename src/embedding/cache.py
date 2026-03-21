@@ -132,7 +132,7 @@ class VectorCache:
         self._ids_path.write_text(
             json.dumps(chunk_ids, ensure_ascii=False), encoding="utf-8"
         )
-        log.info("Saved %d vectors → %s", len(chunk_ids), self._vec_path)
+        log.info("Saved %d vectors -> %s", len(chunk_ids), self._vec_path)
 
     # ------------------------------------------------------------------
     # High-level: incremental embedding  (main entry point)
@@ -150,7 +150,7 @@ class VectorCache:
 
         Workflow
         --------
-        1. Load existing cache → {chunk_id: row_index} lookup.
+        1. Load existing cache -> {chunk_id: row_index} lookup.
         2. Identify chunks whose chunk_id is absent.
         3. Embed missing chunks in macro_batch-sized progress ticks.
         4. Merge new vectors into the cache and persist to disk.

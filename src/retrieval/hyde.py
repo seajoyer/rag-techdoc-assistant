@@ -9,8 +9,8 @@ This module is used **only for the dense embedding leg** of the hybrid search.
 The sparse (keyword IDF) leg keeps the original query.
 
 Using different representations for each leg is the key insight:
-    dense leg  → embed(hypothetical_snippet)  # catches semantic similarity
-    sparse leg → tokenize(original_query)     # catches exact keyword matches
+    dense leg  -> embed(hypothetical_snippet)  # catches semantic similarity
+    sparse leg -> tokenize(original_query)     # catches exact keyword matches
 
 Error handling
 ~~~~~~~~~~~~~~

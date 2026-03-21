@@ -5,7 +5,7 @@
 [![Qdrant](https://img.shields.io/badge/vector%20store-Qdrant-red?logo=qdrant&logoColor=white)](https://qdrant.tech/)
 [![Telegram Bot](https://img.shields.io/badge/Telegram-@techdoc__assistant__bot-2CA5E0?logo=telegram&logoColor=white)](https://t.me/techdoc_assistant_bot)
 
-A retrieval-augmented generation (RAG) system that answers questions about PyTorch using the official documentation as its knowledge base. It blends dense semantic search with sparse keyword search, merges results through Reciprocal Rank Fusion, optionally reranks with a cross-encoder, and produces citation-backed answers using a hosted LLM — all accessible through a Telegram bot: [@techdoc_assistant_bot](https://t.me/techdoc_assistant_bot).
+A retrieval-augmented generation (RAG) system that answers questions about PyTorch using the official documentation as its knowledge base. It blends dense semantic search with sparse keyword search, fuses results via Reciprocal Rank Fusion, optionally reranks with a cross-encoder, and produces citation-backed answers using an LLM API — all accessible through a Telegram bot: [@techdoc_assistant_bot](https://t.me/techdoc_assistant_bot).
 
 ---
 
@@ -34,7 +34,7 @@ Each incoming question goes through two parallel retrieval paths — dense vecto
 Dense retrieval is optionally boosted by HyDE (Hypothetical Document Embeddings): the LLM first generates a short hypothetical answer, which is embedded and used as the query vector instead of the raw question — significantly improving recall for API-style queries.
 
 <details>
-  <summary>Expand the diagram...</summary>
+  <summary>Show the diagram</summary>
 
 ```mermaid
 flowchart TD
@@ -75,17 +75,19 @@ flowchart TD
 
 ## Evaluation
 
-RAGAS evaluation on 20 hand-curated PyTorch questions, judged by LLaMA 3.3 70B against Claude Sonnet 4.6 reference answers.
+RAGAS evaluation on 20 hand-curated PyTorch questions, judged by LLaMA 3.3 70B against Claude Sonnet 4.6 reference answers. The pipeline was evaluated with HyDE and cross-encoder reranking enabled (top-20 candidates, α=0.7, final top-6).
 
 | Metric | Score | What it measures |
 |---|:---:|---|
-| Answer Relevancy | **0.90** | Is the answer on-topic for the question? |
-| Faithfulness | **0.88** | Is every claim grounded in the retrieved context? |
-| Context Precision | **0.73** | Are retrieved chunks actually useful for the reference answer? |
-| Context Recall | **0.73** | Does the retrieved context cover all claims in the reference? |
+| Faithfulness | **0.95** | Is every claim grounded in the retrieved context? |
+| Answer Relevancy | **0.92** | Is the answer on-topic for the question? |
+| Context Precision | **0.86** | Are retrieved chunks actually useful for the reference answer? |
+| Context Recall | **0.74** | Does the retrieved context cover all claims in the reference? |
 | Answer Correctness | **0.67** | How factually correct is the answer compared to the reference? |
 
-The retrieval scores (precision / recall ≈ 0.73) are the main lever for improvement. Adding the cross-encoder reranker narrows the precision gap by re-ordering the RRF shortlist before it reaches the LLM. The answer correctness gap (0.67) is expected: LLaMA 3.3 70B sometimes produces a correct but differently-worded answer that the embedding-based AnswerCorrectness metric penalises.
+The answer correctness gap (0.67) is expected: LLaMA 3.3 70B sometimes produces a correct but differently-worded answer that the embedding-based `AnswerCorrectness` metric penalises.
+
+[RAGAS Evaluation Notebook](notebooks/05_ragas_evaluation.ipynb)
 
 ---
 
@@ -110,14 +112,14 @@ The retrieval scores (precision / recall ≈ 0.73) are the main lever for improv
 ## Project Structure
 
 <details>
-  <summary>Expand the project structure...</summary>
+  <summary>Show the project structure</summary>
 
 ```
 rag-techdoc-assistant/
 ├── pyproject.toml                 # project metadata & dependencies (uv)
 ├── devenv.nix                     # devenv shell & package configuration
 ├── devenv.yaml                    # devenv inputs / follows
-├── Dockerfile                     # CPU / HF Inference image (~400 MB)
+├── Dockerfile                     # CPU / HF Inference image
 ├── docker-compose.yml             # default (CPU) + gpu profile
 ├── .env                           # secrets (not committed)
 ├── LICENSE
@@ -181,7 +183,7 @@ rag-techdoc-assistant/
 
 ## Ingestion Pipeline
 
-The knowledge base is built by running four notebooks in order. Each is self-contained and documents its own configuration at the top.
+The knowledge base is built by running four notebooks in order. Each is self-contained and documents its own purpose at the top.
 
 | Notebook | Stage | Output |
 |---|---|---|
@@ -193,7 +195,7 @@ The knowledge base is built by running four notebooks in order. Each is self-con
 **Chunking strategy** — the HTML converter embeds `<!-- section: anchor -->` and `<!-- api: symbol -->` comments at every structural boundary. The chunker then: (1) splits on those markers, (2) merges forward any stub segments below `min_chars`, and (3) sub-splits oversized sections at paragraph boundaries with a configurable overlap tail.
 
 <details>
-  <summary>Pipeline in more detail...</summary>
+  <summary>Pipeline in more detail</summary>
 
 ### Stage 1 — Data Acquisition
 
@@ -316,6 +318,11 @@ HYDE_ENABLED=true
 # hf    → always use HuggingFace Inference API
 EMBEDDER_MODE=auto
 
+# --- Cross-encoder reranker (optional) ---
+RERANKER_ENABLED=false
+RERANKER_ALPHA=0.7        # blend weight: 1.0 = pure CE, 0.0 = pure RRF
+RERANKER_TOP_K=12         # candidates fetched before reranking; final = TOP_K
+
 # --- Streaming (Telegram Bot API 9.5+ sendMessageDraft) ---
 STREAMING_ENABLED=false
 STREAMING_DRAFT_INTERVAL=0.2   # seconds between draft updates
@@ -370,11 +377,11 @@ Run notebooks `01` through `03` in order (see [Ingestion Pipeline](#ingestion-pi
 
 **Split-channel HyDE.** The HyDE transformer generates a hypothetical documentation snippet and uses it *only* for the dense embedding. The sparse leg always receives the original query. This keeps exact symbol names (e.g. `torch.autocast`) firmly in the keyword leg where they belong, while letting the dense leg operate on semantically richer text.
 
-**Optional cross-encoder reranking.** After RRF fusion, an optional `CrossEncoderReranker` scores every (query, passage) pair with `cross-encoder/ms-marco-MiniLM-L-6-v2`. The bi-encoder retrieves a wider candidate pool (`top_k × multiplier`, e.g. 24 for `top_k=6`), and the cross-encoder re-orders it before the final slice. This adds a small latency overhead (~50–200 ms on CPU for 24 candidates) but tightens context precision by catching relevance signals that independent query and document embeddings miss. The reranker degrades gracefully: if `sentence-transformers` is not installed it falls back to a no-op, preserving the RRF order.
+**CE + RRF score blending.** After RRF fusion, an optional `CrossEncoderReranker` rescores each (query, passage) pair with `cross-encoder/ms-marco-MiniLM-L-6-v2` and blends the two signals: `final = α · CE_norm + (1 − α) · RRF_norm`, where both scores are min-max normalised within the batch before combining. The bi-encoder retrieves a wider candidate pool (`RERANKER_TOP_K`, e.g. 12–20) and the cross-encoder re-orders it before the final `TOP_K` slice. α=0.7 (CE-leaning) is the default; setting α=0.0 degrades gracefully to pure RRF order without loading the model. The reranker is optional and degrades gracefully if `sentence-transformers` is not installed.
 
 **Feature-hashed sparse vectors.** Using a vocabulary-free hashing trick (FNV-1a, 2¹⁷ buckets) means new pages can be upserted at any time without rebuilding a vocabulary artefact. Qdrant's IDF modifier applies collection-level IDF to queries at search time, giving BM25-like scoring without any offline IDF computation.
 
-**Structured RAG output.** `build_rag_chain` returns a `RAGResult` dataclass — not a raw string. Citation markers (`[N]`) in the answer are resolved back to `SourceRef` objects (URL, title, symbol) before the result is returned, so callers never need to parse footnotes themselves.
+**Structured RAG output.** `build_rag_chain` returns a `RAGResult` dataclass. Citation markers (`[N]`) in the answer are resolved back to `SourceRef` objects (URL, title, symbol) before the result is returned, so callers never need to parse footnotes themselves.
 
 **Resumable crawl.** The data acquisition pipeline tracks already-saved URLs in `_index.jsonl`. Re-running the notebook is a no-op for completed pages, making incremental updates straightforward. The same pattern applies to chunking (`_chunks.jsonl`) and embedding (`_vectors.npy` + `_vector_ids.json`).
 
@@ -386,21 +393,31 @@ Run notebooks `01` through `03` in order (see [Ingestion Pipeline](#ingestion-pi
   <summary>Q: How do I move a tensor to GPU?</summary>
 
 ```
-You can move a tensor to GPU using the `.cuda()` method [1], the `.to()`
-method [1][2], or by specifying the device when creating the tensor [1].
-For example, `torch.tensor([1., 2.]).cuda()` [1],
-`torch.tensor([1., 2.]).to(device=cuda)` [1][2], or
-`torch.tensor([1., 2.], device=cuda0)` [1] will move the tensor to the GPU.
-Note that the `cuda` device type is also used for HIP (ROCm) devices [3].
+You can move a tensor to GPU using the to() method [1] or the cuda() method [2].
+The to() method allows you to specify the device, dtype, and other options,
+while the cuda() method returns a copy of the tensor in CUDA memory [2]. 
+
+For example, you can use tensor.to(device=cuda) [1] or tensor.cuda() [2] to move
+a tensor to the default CUDA device, or tensor.to(device=cuda2) [1] or
+tensor.cuda(cuda2) [2] to move a tensor to a specific GPU, such as GPU 2 [3]. 
+
+Additionally, you can use the torch.device object to specify the device, such as
+cuda = torch.device('cuda') [3]. 
+
+It is also possible to use the with torch.cuda.device(1): context manager to
+allocate tensors on a specific GPU [3]. 
+
+Note that the to() method and cuda() method have similar parameters, including
+device, non_blocking, and memory_format [1][2].
 
 Sources
 ----------------------------------------
-  [1] CUDA semantics
-       https://docs.pytorch.org/docs/stable/notes/cuda.html#cuda-semantics
-  [2] torch.Tensor.to
-       https://docs.pytorch.org/docs/stable/generated/torch.Tensor.to.html#torch.Tensor.to
-  [3] HIP (ROCm) semantics
-       https://docs.pytorch.org/docs/stable/notes/hip.html#hip-interfaces-reuse-the-cuda-interfaces
+[1] torch.Tensor.to
+     https://docs.pytorch.org/docs/stable/generated/torch.Tensor.to.html#torch.Tensor.to
+[2] torch.Tensor.cuda
+     https://docs.pytorch.org/docs/stable/generated/torch.Tensor.cuda.html#torch.Tensor.cuda
+[3] CUDA semantics
+     https://docs.pytorch.org/docs/stable/notes/cuda.html#cuda-semantics
 ```
 
 </details>
@@ -410,17 +427,17 @@ Sources
 
 ```
 The difference between `torch.Tensor` and `torch.tensor` is that `torch.Tensor`
-is a class [1], whereas `torch.tensor` is a function that constructs a tensor [2]. 
+is a class [1], whereas `torch.tensor` is a function that constructs a tensor [2].
 
 `torch.tensor` is the recommended way to create a tensor, and it is equivalent to
-using the `torch.Tensor` class, but with a more functional API [1]. 
+using the `torch.Tensor` class, but with a more functional API [1].
 
 Additionally, there is a legacy constructor `torch.Tensor` whose use is
-discouraged, and it is recommended to use `torch.tensor()` instead [1]. 
+discouraged, and it is recommended to use `torch.tensor()` instead [1].
 
 It's also worth noting that `torch.tensor()` creates a tensor with no autograd
 history, whereas `torch.Tensor` can be created with `requires_grad=True` to
-record operations for automatic differentiation [3]. 
+record operations for automatic differentiation [3].
 
 Sources
 ----------------------------------------
@@ -438,20 +455,17 @@ Sources
   <summary>Q: How does gradient checkpointing reduce memory usage?</summary>
 
 ```
-Gradient checkpointing reduces memory usage by dividing a sequential model
-into segments and only storing the intermediate activations of the last segment [1].
-This is achieved through the `torch.utils.checkpoint.checkpoint_sequential`
-function, which allows the model to be executed in segments, with only the inputs
-of each segment being saved for re-running in the backward pass [1]. By not storing
-the intermediate activations of all segments, gradient checkpointing can
-significantly reduce the memory usage of large deep learning models [2].
+Gradient checkpointing reduces memory usage by not keeping alive tensors
+computed during the forward pass until they are used in gradient computations
+in the backward pass [1]. Instead, any passed tensors in args are kept alive,
+and the unsaved tensors are recomputed by re-invoking function in the backward
+pass as needed for gradient computation [1]. This technique is known as
+activation checkpointing and can be applied to any part of a model [1].
 
 Sources
 ----------------------------------------
-  [1] torch.utils.checkpoint.checkpoint_sequential
-       https://docs.pytorch.org/docs/stable/checkpoint.html#torch.utils.checkpoint.checkpoint_sequential
-  [2] Modules
-       https://docs.pytorch.org/docs/stable/notes/modules.html#improving-memory-usage-with-pruning
+[1] torch.utils.checkpoint.checkpoint
+     https://docs.pytorch.org/docs/stable/checkpoint.html#torch.utils.checkpoint.checkpoint
 ```
 
 </details>
@@ -460,30 +474,37 @@ Sources
   <summary>Q: What does <code>torch.no_grad()</code> do and when should I use it?</summary>
 
 ```
-`torch.no_grad()` is a context-manager that disables gradient calculation [1].
-It is useful for inference, when you are sure that you will not call
-`Tensor.backward()`, as it reduces memory consumption for computations that
-would otherwise have `requires_grad=True` [1]. 
+torch.no_grad() is a context-manager that disables gradient calculation [1]. It
+is useful for inference, when you are sure that you will not call
+Tensor.backward() [1]. Disabling gradient calculation reduces memory consumption
+for computations that would otherwise have requires_grad=True [1]. 
 
-You should use `torch.no_grad()` when you need to perform operations that
-should not be recorded by autograd, but you'd still like to use the outputs of
-these computations in grad mode later [2]. For example, it might be useful
-when writing an optimizer or when initializing parameters in `torch.nn.init` to
-avoid autograd tracking when updating the initialized parameters in-place [2]. 
+You should use torch.no_grad() when you need to perform operations that should
+not be recorded by autograd, but you’d still like to use the outputs of these
+computations in grad mode later [2]. For example, it might be useful when
+writing an optimizer or when initializing parameters [2]. 
 
-Note that `torch.no_grad()` is one of several mechanisms that can enable or
-disable gradients locally, and it does not apply to forward-mode AD [1].
-Additionally, it is a thread-local context manager, so it will not affect
-computation in other threads [1][3].
+Note that torch.no_grad() does not apply to forward-mode AD [1][3][4] and is one
+of several mechanisms that can enable or disable gradients locally [1][4][5][6]. 
+
+In summary, use torch.no_grad() when you want to disable gradient calculation
+for a block of code or function, and you intend to use the outputs of these
+computations in grad mode later [1][2].
 
 Sources
 ----------------------------------------
-  [1] torch.no_grad
-       https://docs.pytorch.org/docs/stable/generated/torch.no_grad.html#torch.no_grad
-  [2] Autograd mechanics
-       https://docs.pytorch.org/docs/stable/notes/autograd.html#no-grad-mode
-  [3] torch
-       https://docs.pytorch.org/docs/stable/torch.html#locally-disabling-gradient-computation
+[1] torch.no_grad 
+     https://docs.pytorch.org/docs/stable/generated/torch.no_grad.html#torch.no_grad
+[2] Autograd mechanics
+     https://docs.pytorch.org/docs/stable/notes/autograd.html#no-grad-mode
+[3] torch.func.grad
+     https://docs.pytorch.org/docs/stable/generated/torch.func.grad.html#torch.func.grad
+[4] torch.autograd.grad_mode.inference_mode
+     https://docs.pytorch.org/docs/stable/generated/torch.autograd.grad_mode.inference_mode.html#torch.autograd.grad_mode.inference_mode
+[5] torch
+     https://docs.pytorch.org/docs/stable/torch.html#locally-disabling-gradient-computation
+[6] torch.enable_grad
+     https://docs.pytorch.org/docs/stable/generated/torch.enable_grad.html#torch.enable_grad
 ```
 
 </details>
@@ -492,23 +513,21 @@ Sources
   <summary>Q: How does <code>torch.autograd.grad</code> differ from calling <code>.backward()</code>?</summary>
 
 ```
-torch.autograd.grad differs from calling .backward() in that it computes
-and returns the gradients, rather than accumulating them in the .grad
-attribute of the inputs [1]. In contrast, .backward() accumulates the
-gradients in the leaves of the graph [2]. Additionally,
-torch.autograd.grad allows for more fine-grained control over the
-computation, such as specifying the grad_outputs and create_graph [1],
-whereas .backward() requires specifying grad_tensors and create_graph [2].
-
-It is also noted that using torch.autograd.grad is recommended over using
-.backward() with `create_graph=True` to avoid memory leaks [2].
+torch.autograd.grad differs from calling .backward() in that it computes and
+returns the sum of gradients of outputs with respect to the inputs, whereas
+.backward() accumulates gradients in the leaves [1][2]. Additionally,
+torch.autograd.grad allows for more flexibility, such as specifying grad_outputs
+and retain_graph, and returns the gradients as a tuple of tensors, whereas
+.backward() modifies the .grad attributes of the tensors in-place [1][2]. It is
+also noted that using torch.autograd.grad is recommended over
+torch.autograd.backward when creating a graph to avoid memory leaks [1].
 
 Sources
 ----------------------------------------
-[1] torch.autograd.grad
-    https://docs.pytorch.org/docs/stable/generated/torch.autograd.grad.html#torch.autograd.grad
-[2] torch.autograd.backward
+[1] torch.autograd.backward
     https://docs.pytorch.org/docs/stable/generated/torch.autograd.backward.html#torch.autograd.backward
+[2] torch.autograd.grad
+    https://docs.pytorch.org/docs/stable/generated/torch.autograd.grad.html#torch.autograd.grad
 ```
 
 </details>

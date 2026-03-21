@@ -134,7 +134,7 @@ class HFInferenceEmbedder:
         #   (b) list[list[list[float]]]    — token-level outputs  (needs pooling)
         arr = np.array(data, dtype=np.float32)
         if arr.ndim == 3:
-            # token-level → mean-pool over the token dimension
+            # token-level -> mean-pool over the token dimension
             arr = arr.mean(axis=1)
         if arr.shape[-1] != self.EMBED_DIM:
             raise RuntimeError(

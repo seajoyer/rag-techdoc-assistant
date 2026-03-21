@@ -163,7 +163,7 @@ def format_rag_response(result: RAGResult) -> str:
     if len(answer) > _MAX_ANSWER_CHARS:
         answer = answer[:_MAX_ANSWER_CHARS].rsplit(" ", 1)[0] + " …\n\n<i>(answer truncated)</i>"
 
-    # ── Convert minimal Markdown → HTML ───────────────────────────────
+    # ── Convert minimal Markdown -> HTML ───────────────────────────────
     answer = _md_to_html(answer)
 
     # ── Inject clickable citation links ───────────────────────────────
@@ -206,7 +206,7 @@ def format_error(exc: Exception) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Internal: Markdown → Telegram HTML
+# Internal: Markdown -> Telegram HTML
 # ---------------------------------------------------------------------------
 
 def _md_to_html(text: str) -> str:

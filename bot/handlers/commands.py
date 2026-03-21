@@ -99,7 +99,7 @@ async def cmd_status(message: Message) -> None:
     try:
         chain = await services.get_chain()
         # Navigate to the store inside the chain to get collection info.
-        # The retriever is stored inside retrieve_and_pack closure → extract via first step.
+        # The retriever is stored inside retrieve_and_pack closure -> extract via first step.
         # Simpler: we can get info if the store is accessible.  For now report generic info.
         lines.append("\n✅ Qdrant connection: <b>OK</b>")
     except Exception as exc:

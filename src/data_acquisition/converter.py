@@ -28,7 +28,7 @@ chunker unambiguous, machine-readable split points without relying on
 fragile text-pattern heuristics.  They also carry the anchor fragment
 needed for citation link construction:
 
-    base_url + "#" + anchor  →  https://pytorch.org/…#torch.random.fork_rng
+    base_url + "#" + anchor  ->  https://pytorch.org/…#torch.random.fork_rng
 """
 
 from __future__ import annotations
@@ -62,7 +62,7 @@ class PyTorchMarkdownConverter(MarkdownConverter):
 
     def convert_code(self, el: Tag, text: str, convert_as_inline: bool = False, **kwargs) -> str:
         """
-        Inline <code> → backtick span.
+        Inline <code> -> backtick span.
 
         When <code> is a direct child of <pre>, convert_pre() owns the
         fencing — we return the raw text so it is not double-wrapped.

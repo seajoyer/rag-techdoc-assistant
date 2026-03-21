@@ -308,7 +308,7 @@ def _extract_params(dt_el: Tag) -> list[str]:
 
     Example
     -------
-    ``fork_rng(devices=None, enabled=True)``  →  ``["devices", "enabled"]``
+    ``fork_rng(devices=None, enabled=True)``  ->  ``["devices", "enabled"]``
     """
     params: list[str] = []
     for em in dt_el.find_all("em", class_="sig-param"):

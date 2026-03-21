@@ -1,7 +1,7 @@
 """
 chain.py
 --------
-Citation-aware RAG chain: HybridQdrantRetriever → Groq (llama-3.3-70b-versatile).
+Citation-aware RAG chain: HybridQdrantRetriever -> Groq (llama-3.3-70b-versatile).
 
 Design goals
 ~~~~~~~~~~~~
@@ -269,7 +269,7 @@ def build_rag_chain(
     """
     llm = ChatGroq(
         model=model,
-        api_key=groq_api_key,  # None → reads GROQ_API_KEY from env
+        api_key=groq_api_key,  # None -> reads GROQ_API_KEY from env
         temperature=temperature,
         max_tokens=max_tokens,
         streaming=streaming,
@@ -372,7 +372,7 @@ def build_rag_chain(
 
 
 # ---------------------------------------------------------------------------
-# Streaming generator  (yields tokens → RAGResult, runs in a thread pool)
+# Streaming generator  (yields tokens -> RAGResult, runs in a thread pool)
 # ---------------------------------------------------------------------------
 
 

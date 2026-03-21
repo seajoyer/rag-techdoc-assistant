@@ -2,7 +2,7 @@
 pipeline.py
 -----------
 Orchestrates the full data-acquisition pipeline:
-  discovery → fetch → clean → extract → convert → save
+  discovery -> fetch -> clean -> extract -> convert -> save
 
 Also owns the DocPage dataclass (the single data contract between all modules)
 and the JSONL index manifest.
@@ -22,7 +22,7 @@ from typing import Callable, Iterable
 from urllib.parse import urlparse
 
 from bs4 import BeautifulSoup
-from tqdm.auto import tqdm  # auto → uses tqdm.notebook inside Jupyter
+from tqdm.auto import tqdm
 
 from .cleaner import clean_html, extract_main_content, extract_title
 from .converter import html_to_markdown
@@ -228,8 +228,8 @@ def save_page(page: DocPage, output_dir: Path) -> Path:
     Write page.markdown to disk as a .md file.
 
     The path mirrors the URL structure:
-      .../docs/stable/nn.html  →  <output_dir>/nn.md
-      .../docs/stable/torch/index.html  →  <output_dir>/torch/index.md
+      .../docs/stable/nn.html  ->  <output_dir>/nn.md
+      .../docs/stable/torch/index.html  ->  <output_dir>/torch/index.md
 
     Sets page.saved_path (relative str) as a side-effect.
 
@@ -257,7 +257,7 @@ def save_index(
     with index_path.open(mode, encoding="utf-8") as f:
         for rec in records:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-    log.info("Index %s → %s", "appended to" if append else "written", index_path)
+    log.info("Index %s -> %s", "appended to" if append else "written", index_path)
 
 
 # ---------------------------------------------------------------------------

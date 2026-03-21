@@ -7,12 +7,12 @@ Collection layout
 ~~~~~~~~~~~~~~~~~
 Named dense vector:
 
-    "dense"    → 1 024-dim float32, Distance.COSINE
+    "dense"    -> 1 024-dim float32, Distance.COSINE
                  Source: BAAI/bge-m3 via HuggingFace Inference
 
 Named sparse vector:
 
-    "keywords" → SparseVectorParams(modifier=Modifier.IDF)
+    "keywords" -> SparseVectorParams(modifier=Modifier.IDF)
                  Source: Chunk.keywords via feature-hashed raw-TF vectors
                  Qdrant applies IDF normalisation to queries at search time.
 
@@ -29,10 +29,10 @@ Hybrid search with RRF fusion
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 ``hybrid_search()`` uses the Qdrant Query API (>= 1.9):
 
-    prefetch[0]  → dense ANN  (top k*3 candidates)
-    prefetch[1]  → sparse     (top k*3 candidates)
-    query        → FusionQuery(fusion=Fusion.RRF)  (re-ranks with RRF)
-    limit        → top_k final results
+    prefetch[0]  -> dense ANN  (top k*3 candidates)
+    prefetch[1]  -> sparse     (top k*3 candidates)
+    query        -> FusionQuery(fusion=Fusion.RRF)  (re-ranks with RRF)
+    limit        -> top_k final results
 
 Split-channel HyDE
 ~~~~~~~~~~~~~~~~~~
@@ -41,8 +41,8 @@ provided (by ``HybridQdrantRetriever`` with an attached ``HyDETransformer``),
 the dense leg embeds this text instead of the raw query.  The sparse leg
 always uses the original query for exact keyword matching.
 
-    dense leg  → embed(dense_query or query)    # HyDE snippet if available
-    sparse leg → tokenize(query)                # always the original question
+    dense leg  -> embed(dense_query or query)    # HyDE snippet if available
+    sparse leg -> tokenize(query)                # always the original question
 
 Cross-encoder reranking
 ~~~~~~~~~~~~~~~~~~~~~~~

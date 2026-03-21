@@ -1,21 +1,3 @@
-"""
-query_log.py
-------------
-Forwards user queries to a private logging group after the bot responds.
-
-Each notification looks like:
-
-    👤 First Last (@username)  |  id: 123456789
-    https://t.me/username  (or tg://user?id=... for users without a username)
-
-    Query:
-
-    How does torch.autograd.grad differ from .backward()?
-
-The message is sent best-effort: any Telegram API error is logged and
-silently swallowed so a logging failure never affects the user-facing reply.
-"""
-
 from __future__ import annotations
 
 import html
@@ -29,7 +11,7 @@ log = logging.getLogger(__name__)
 
 async def log_query(bot: Bot, user: User, query: str, log_group_id: int) -> None:
     """
-    Send a query-log notification to *log_group_id*.
+    Send a query-log notification to <log_group_id>
 
     Parameters
     ----------
@@ -42,7 +24,6 @@ async def log_query(bot: Bot, user: User, query: str, log_group_id: int) -> None
     log_group_id:
         Chat ID of the private logging group.
     """
-    # Build a human-readable user line and a deep-link.
     name_parts = [user.first_name]
     if user.last_name:
         name_parts.append(user.last_name)

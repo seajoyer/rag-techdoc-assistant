@@ -14,8 +14,8 @@ The two signals are then blended:
 where both scores are min-max normalised to [0, 1] within the batch before
 blending.  Neither signal fully overrides the other:
 
-    dense / sparse / RRF  → strong at exact symbol matching and recall
-    cross-encoder         → strong at semantic relevance and precision
+    dense / sparse / RRF  -> strong at exact symbol matching and recall
+    cross-encoder         -> strong at semantic relevance and precision
 
 Typical alpha values
 ~~~~~~~~~~~~~~~~~~~~
@@ -23,24 +23,6 @@ Typical alpha values
     α = 0.5   equal weight
     α = 0.7   CE-leaning — good default for prose questions
     α = 1.0   pure CE  (RRF score ignored after retrieval)
-
-Model
-~~~~~
-``cross-encoder/ms-marco-MiniLM-L-6-v2`` is the default: ~22 MB,
-~50–200 ms on CPU for 24 candidates, strong on passage relevance.
-Swap to ``BAAI/bge-reranker-v2-m3`` for multilingual or heavier workloads.
-
-Usage
-~~~~~
-    from src.retrieval import CrossEncoderReranker
-
-    reranker = CrossEncoderReranker()            # lazy model load
-    retriever = store.as_retriever(
-        top_k=12,                                # fetch more candidates ...
-        reranker=reranker,
-        reranker_alpha=0.7,                      # CE-leaning blend
-        final_top_k=6,                           # ... keep fewer after rerank
-    )
 """
 
 from __future__ import annotations
@@ -111,7 +93,7 @@ class CrossEncoderReranker:
     ) -> None:
         self._model_name   = model_name_or_path
         self._max_length   = max_length
-        self._device       = device     # None → auto-selected at load time
+        self._device       = device     # None -> auto-selected at load time
         self.default_alpha = default_alpha
         self._model        = None       # lazy — loaded on first rerank() call
 
@@ -197,7 +179,7 @@ class CrossEncoderReranker:
 
         alpha = self.default_alpha if alpha is None else float(alpha)
 
-        # alpha == 0 → pure RRF order; stamp metadata and return early.
+        # alpha == 0 -> pure RRF order; stamp metadata and return early.
         if alpha == 0.0:
             for doc, rrf in zip(docs, rrf_scores):
                 doc.metadata["rrf_score"] = float(rrf)

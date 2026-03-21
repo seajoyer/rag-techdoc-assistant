@@ -22,7 +22,6 @@ Split strategy
     tail prepended to each continuation sub-chunk, preserving cross-boundary
     context.  Code fences (``` … ```) are treated as atomic paragraphs: they
     are never split mid-fence.
-
 """
 
 from __future__ import annotations
@@ -32,20 +31,10 @@ import re
 from dataclasses import dataclass, field
 from typing import Sequence
 
-# ---------------------------------------------------------------------------
-# Imports from sibling package
-# These use relative imports so the module can live at
-#   src/chunking/chunker.py  (from src.chunking.chunker import …)
-# or be run directly against the data_acquisition types.
-# ---------------------------------------------------------------------------
-
-# We import only the types we need, not the full package, to keep this module
-# usable as a standalone file (e.g. dropped next to pipeline.py temporarily).
 try:
     from ..data_acquisition.pipeline import DocPage
     from ..data_acquisition.extractor import PageMarkers, SectionMarker
 except ImportError:
-    # Allow running the module directly for quick tests
     from data_acquisition.pipeline import DocPage          # type: ignore[no-redef]
     from data_acquisition.extractor import PageMarkers, SectionMarker  # type: ignore[no-redef]
 
@@ -252,7 +241,7 @@ class ChunkSplitter:
             # Fallback: treat the entire page as one chunk with a synthetic anchor.
             return self._fallback_chunk(page)
 
-        # Step 2: Build anchor → SectionMarker lookup from page metadata.
+        # Step 2: Build anchor -> SectionMarker lookup from page metadata.
         marker_index = _build_marker_index(page.markers)
 
         # Step 3: Merge undersized segments forward so stubs don't pollute the index.
